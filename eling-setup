@@ -1,0 +1,668 @@
+#!/usr/bin/env bash
+#
+# ELING Setup Command
+# -------------------
+# Configures provider, API key, base URL, and agent settings.
+# Saves to ~/.eling/config.yaml
+# Fully self-contained – no external YAML dependencies needed.
+#
+# Usage:
+#   ./eling-setup                    # Interactive mode
+#   ./eling-setup --help             # Show this help
+#   ./eling-setup --list             # List current configuration
+#
+#   # Non-interactive (all flags):
+#   ./eling-setup \
+#     --provider opencode-zen \
+#     --model deepseek-v4-flash \
+#     --api-key "sk-..." \
+#     --base-url "https://opencode.ai/zen/v1" \
+#     --system-prompt "You are ELING..." \
+#     --max-context 32768
+#
+#   # Quick setup – just set API key (interactive prompts for rest):
+#   ./eling-setup --api-key "sk-..."
+#
+#   # Add a new provider (keeps existing ones):
+#   ./eling-setup --add-provider \
+#     --provider groq \
+#     --model llama-3.3-70b \
+#     --api-key "gsk-..." \
+#     --base-url "https://api.groq.com/openai/v1"
+#
+# Environment variables:
+#   ELING_CONFIG  - Path to config file (default: ~/.eling/config.yaml)
+
+set -euo pipefail
+
+CONFIG_FILE="${ELING_CONFIG:-$HOME/.eling/config.yaml}"
+
+# ── Color helpers ──────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+header(){ echo -e "\n${BOLD}${BLUE}━━━ $* ━━━${NC}\n"; }
+prompt(){ echo -ne "${CYAN}>>${NC} $* "; }
+
+# ── Bash-native YAML reading ──────────────────────────────────────────────
+# These are simple parsers for the subset of YAML used by ELING config.
+# They work line-by-line without any external dependencies.
+
+# Read a simple scalar value from a YAML key (e.g. "agent.default_model")
+# Supports one level of nesting with "parent.child" syntax.
+yaml_read() {
+  local key="$1"
+  local file="$2"
+  local parent=""
+  local child="$key"
+
+  if [[ "$key" == *"."* ]]; then
+    parent="${key%.*}"
+    child="${key##*.}"
+  fi
+
+  local in_section=false
+  local found=""
+
+  if [ ! -f "$file" ]; then
+    echo ""
+    return
+  fi
+
+  while IFS= read -r line; do
+    # Strip leading/trailing whitespace
+    local trimmed="${line#"${line%%[! ]*}"}"
+
+    # Skip empty lines and comments
+    [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
+
+    if [ -n "$parent" ]; then
+      # Check if we're entering the parent section
+      if [[ "$line" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*: ]] && ! $in_section; then
+        local section_name="${line%%:*}"
+        if [ "$section_name" = "$parent" ]; then
+          in_section=true
+        fi
+        continue
+      fi
+      if $in_section; then
+        # Check if we've left the section (next top-level key)
+        if [[ "$line" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*: ]] && [[ "$line" != " "* ]]; then
+          in_section=false
+          continue
+        fi
+        # Look for the child key within the parent section
+        local stripped="${line#"${line%%[! ]*}"}"
+        if [[ "$stripped" =~ ^${child}: ]]; then
+          found="${stripped#*: }"
+          found="${found#\"}"
+          found="${found%\"}"
+          break
+        fi
+      fi
+    else
+      # Top-level key
+      if [[ "$line" =~ ^${child}: ]]; then
+        found="${line#*: }"
+        found="${found#\"}"
+        found="${found%\"}"
+        break
+      fi
+    fi
+  done < "$file"
+
+  echo "$found"
+}
+
+# Update or set a simple YAML scalar value (non-destructive for lists).
+# This is a simple line-based replacer. For full structure we rebuild the file.
+yaml_set() {
+  local key="$1"   # e.g. "agent.default_model"
+  local value="$2"
+  local file="$3"
+
+  if [ ! -f "$file" ]; then
+    return 1
+  fi
+
+  local parent=""
+  local child="$key"
+  if [[ "$key" == *"."* ]]; then
+    parent="${key%.*}"
+    child="${key##*.}"
+  fi
+
+  local tmpfile=$(mktemp)
+  local in_section=false
+  local found=false
+
+  while IFS= read -r line; do
+    if [ -n "$parent" ]; then
+      if [[ "$line" =~ ^${parent}: ]] && ! $in_section; then
+        in_section=true
+        echo "$line" >> "$tmpfile"
+        continue
+      fi
+      if $in_section; then
+        # Check if we left the section
+        if [[ "$line" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*: ]] && [[ "$line" != " "* ]]; then
+          # We've moved to a new top-level key without finding the child
+          in_section=false
+          echo "$line" >> "$tmpfile"
+          continue
+        fi
+        local stripped="${line#"${line%%[! ]*}"}"
+        if [[ "$stripped" =~ ^${child}: ]]; then
+          echo "  $child: \"$value\"" >> "$tmpfile"
+          found=true
+          continue
+        fi
+      fi
+    else
+      if [[ "$line" =~ ^${child}: ]]; then
+        echo "$child: \"$value\"" >> "$tmpfile"
+        found=true
+        continue
+      fi
+    fi
+    echo "$line" >> "$tmpfile"
+  done < "$file"
+
+  # If not found at all, we need to add it
+  if ! $found; then
+    if [ -n "$parent" ]; then
+      # Check if parent section exists
+      local has_parent=false
+      while IFS= read -r line; do
+        if [[ "$line" =~ ^${parent}: ]]; then
+          has_parent=true
+          break
+        fi
+      done < "$file"
+
+      if $has_parent; then
+        # Insert into parent section (before next top-level key)
+        # This is tricky with line-based approach; rebuild using sed
+        rm "$tmpfile"
+        tmpfile=$(mktemp)
+        found=false
+        local parent_found=false
+        while IFS= read -r line; do
+          if [[ "$line" =~ ^${parent}: ]]; then
+            parent_found=true
+            echo "$line" >> "$tmpfile"
+            echo "  $child: \"$value\"" >> "$tmpfile"
+            found=true
+            continue
+          fi
+          if $parent_found && [[ "$line" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*: ]] && [[ "$line" != " "* ]]; then
+            parent_found=false
+          fi
+          if $parent_found && [[ "$line" == " "* ]]; then
+            # Skip inserting extra if we already wrote it
+            :
+          fi
+          if ! $parent_found || [[ "$line" == "${line#"${line%%[! ]*}"}" ]]; then
+            echo "$line" >> "$tmpfile"
+          fi
+        done < "$file"
+
+        if ! $found; then
+          # Add to parent section at end of file
+          echo "  $child: \"$value\"" >> "$tmpfile"
+        fi
+      else
+        # No parent section, add entire structure
+        echo "$parent:" >> "$tmpfile"
+        echo "  $child: \"$value\"" >> "$tmpfile"
+      fi
+    else
+      # Add at end
+      echo "$child: \"$value\"" >> "$tmpfile"
+    fi
+  fi
+
+  mv "$tmpfile" "$file"
+}
+
+# Check if a provider exists in the config
+provider_exists() {
+  local name="$1"
+  local file="$2"
+  [ ! -f "$file" ] && return 1
+
+  while IFS= read -r line; do
+    local stripped="${line#"${line%%[! ]*}"}"
+    if [[ "$stripped" =~ ^-name: ]]; then
+      local prov_name="${stripped#*- name: }"
+      prov_name="${prov_name#\"}"
+      prov_name="${prov_name%\"}"
+      [ "$prov_name" = "$name" ] && return 0
+    fi
+  done < "$file"
+  return 1
+}
+
+# Parse the config and print its values
+print_config() {
+  local file="$1"
+  if [ ! -f "$file" ]; then
+    warn "No config file found at $file"
+    return
+  fi
+
+  local model=$(yaml_read "agent.default_model" "$file")
+  local base_url=$(yaml_read "agent.default_base_url" "$file")
+  local prompt=$(yaml_read "agent.system_prompt" "$file")
+  local context=$(yaml_read "agent.max_context" "$file")
+
+  echo -e "${CYAN}Config file:${NC} $file"
+  echo
+  echo -e "${BOLD}Agent Settings:${NC}"
+  echo -e "  Default Model:   ${GREEN}$model${NC}"
+  echo -e "  Default Base URL: ${GREEN}$base_url${NC}"
+  echo -e "  System Prompt:   ${GREEN}${prompt:0:80}...${NC}"
+  echo -e "  Max Context:     ${GREEN}$context${NC}"
+  echo
+  echo -e "${BOLD}Providers:${NC}"
+
+  # Use awk to parse and format provider blocks from the YAML
+  awk '
+    BEGIN { in_prov=0; pcount=0; }
+    /^[[:space:]]+providers:/ { in_prov=1; next; }
+    /^providers:/ { in_prov=1; next; }
+    in_prov && /^[a-zA-Z_]/ { in_prov=0; next; }
+    in_prov && /[[:space:]]*- name:/ {
+      pcount++;
+      name=$0;
+      sub(/^[[:space:]]*- name:[[:space:]]*"?/, "", name);
+      sub(/"?$/, "", name);
+      printf "  \033[0;36m%d.\033[0m \033[1m%s\033[0m\n", pcount, name;
+      next;
+    }
+    in_prov && /^[[:space:]]+model:/ {
+      val=$0;
+      sub(/^[[:space:]]+model:[[:space:]]*"?/, "", val);
+      sub(/"?$/, "", val);
+      print "     Model:   " val;
+      next;
+    }
+    in_prov && /^[[:space:]]+base_url:/ {
+      val=$0;
+      sub(/^[[:space:]]+base_url:[[:space:]]*"?/, "", val);
+      sub(/"?$/, "", val);
+      print "     Base URL: " val;
+      next;
+    }
+    in_prov && /^[[:space:]]+api_key:/ {
+      val=$0;
+      sub(/^[[:space:]]+api_key:[[:space:]]*"?/, "", val);
+      sub(/"?$/, "", val);
+      if (length(val) > 8) {
+        mask = substr(val, 1, 8) "..." substr(val, length(val)-3, 4);
+      } else {
+        mask = "***";
+      }
+      print "     API Key:  " mask;
+      next;
+    }
+  ' "$file" 2>/dev/null
+
+  echo
+  info "To edit, run: ${BOLD}$0${NC}"
+}
+
+# ── Parse arguments ────────────────────────────────────────────────────────
+PROVIDER=""
+MODEL=""
+API_KEY=""
+BASE_URL=""
+SYSTEM_PROMPT=""
+MAX_CONTEXT=""
+ADD_PROVIDER=false
+LIST_MODE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help|-h)
+      # Extract the usage comment block from the script header
+      awk '/^# ELING Setup Command/,/^# Environment variables:/' "$0" | sed 's/^#//' | sed 's/^ //'
+      exit 0
+      ;;
+    --list)           LIST_MODE=true; shift ;;
+    --add-provider)   ADD_PROVIDER=true; shift ;;
+    --provider)       PROVIDER="$2"; shift 2 ;;
+    --model)          MODEL="$2"; shift 2 ;;
+    --api-key)        API_KEY="$2"; shift 2 ;;
+    --base-url)       BASE_URL="$2"; shift 2 ;;
+    --system-prompt)  SYSTEM_PROMPT="$2"; shift 2 ;;
+    --max-context)    MAX_CONTEXT="$2"; shift 2 ;;
+    *)
+      error "Unknown argument: $1"
+      echo "Usage: $0 [--help] [--list] [--add-provider] [--provider NAME] [--model MODEL] [--api-key KEY] [--base-url URL] [--system-prompt PROMPT] [--max-context N]"
+      exit 1
+      ;;
+  esac
+done
+
+# ── List current config ────────────────────────────────────────────────────
+if $LIST_MODE; then
+  header "Current ELING Configuration"
+  print_config "$CONFIG_FILE"
+  exit 0
+fi
+
+# ── Load existing config values (if present) ──────────────────────────────
+EXISTING_MODEL=$(yaml_read "agent.default_model" "$CONFIG_FILE")
+EXISTING_BASE_URL=$(yaml_read "agent.default_base_url" "$CONFIG_FILE")
+EXISTING_PROMPT=$(yaml_read "agent.system_prompt" "$CONFIG_FILE")
+EXISTING_CONTEXT=$(yaml_read "agent.max_context" "$CONFIG_FILE")
+# Try to extract API key from first provider
+EXISTING_API_KEY=""
+if [ -f "$CONFIG_FILE" ]; then
+  while IFS= read -r line; do
+    stripped="${line#"${line%%[! ]*}"}"
+    if [[ "$stripped" =~ ^-name: ]]; then
+      # This is the first provider; read next lines for api_key
+      for i in 1 2 3 4; do
+        IFS= read -r nextline
+        nextstripped="${nextline#"${nextline%%[! ]*}"}"
+        if [[ "$nextstripped" =~ ^api_key: ]]; then
+          EXISTING_API_KEY="${nextstripped#*api_key: }"
+          EXISTING_API_KEY="${EXISTING_API_KEY#\"}"
+          EXISTING_API_KEY="${EXISTING_API_KEY%\"}"
+          break 2
+        fi
+      done
+      break
+    fi
+  done < "$CONFIG_FILE"
+fi
+
+# ── Collect values (flag > existing > default > interactive) ──────────────
+[ -z "$PROVIDER" ] && PROVIDER="$EXISTING_MODEL" || true
+[ -z "$PROVIDER" ] && PROVIDER="opencode-zen-free" || true
+[ -z "$MODEL" ] && MODEL="$EXISTING_MODEL" || true
+[ -z "$MODEL" ] && MODEL="deepseek-v4-flash-free" || true
+[ -z "$BASE_URL" ] && BASE_URL="$EXISTING_BASE_URL" || true
+[ -z "$BASE_URL" ] && BASE_URL="https://opencode.ai/zen/v1" || true
+[ -z "$API_KEY" ] && API_KEY="$EXISTING_API_KEY" || true
+[ -z "$SYSTEM_PROMPT" ] && SYSTEM_PROMPT="$EXISTING_PROMPT" || true
+[ -z "$SYSTEM_PROMPT" ] && SYSTEM_PROMPT="You are ELING, an auto-learning evolving AI agent." || true
+[ -z "$MAX_CONTEXT" ] && MAX_CONTEXT="$EXISTING_CONTEXT" || true
+[ -z "$MAX_CONTEXT" ] && MAX_CONTEXT="32768" || true
+
+# ── Interactive prompts (if stdin is a terminal) ───────────────────────────
+INTERACTIVE=false
+if [ -t 0 ]; then
+  INTERACTIVE=true
+fi
+
+if $INTERACTIVE && ! $ADD_PROVIDER; then
+  header "ELING Setup"
+  echo -e "Configure your ELING AI agent.\n"
+
+  # API Key
+  if [ -z "$API_KEY" ]; then
+    echo -e "${YELLOW}Enter your API key.${NC}"
+    echo -e "  If you don't have one, get it from: ${BOLD}https://opencode.ai${NC}"
+    echo -e "  ${YELLOW}(The key will be stored in ~/.eling/config.yaml)${NC}"
+    prompt "[API Key]:"
+    read -r API_KEY
+    while [ -z "$API_KEY" ]; do
+      error "API key cannot be empty."
+      prompt "[API Key]:"
+      read -r API_KEY
+    done
+  fi
+
+  # Provider
+  echo
+  echo -e "Available providers:"
+  echo -e "  1) ${CYAN}opencode-zen${NC}      (deepseek-v4-flash,    https://opencode.ai/zen/v1)"
+  echo -e "  2) ${CYAN}opencode-zen-free${NC} (deepseek-v4-flash-free, https://opencode.ai/zen/v1)"
+  echo -e "  3) ${CYAN}deepseek-direct${NC}   (deepseek-v4-flash,    https://api.deepseek.com)"
+  echo -e "  4) ${CYAN}openai${NC}            (gpt-4o,              https://api.openai.com/v1)"
+  echo -e "  5) ${CYAN}groq${NC}              (llama-3.3-70b,       https://api.groq.com/openai/v1)"
+  echo -e "  6) ${CYAN}custom${NC}            (enter your own)"
+  echo
+  prompt "[Provider] (default: 2):"
+  read -r PROVIDER_CHOICE
+  if [ -z "$PROVIDER_CHOICE" ]; then PROVIDER_CHOICE="2"; fi
+
+  case "$PROVIDER_CHOICE" in
+    1) PROVIDER="opencode-zen";       MODEL="deepseek-v4-flash";       BASE_URL="https://opencode.ai/zen/v1" ;;
+    2) PROVIDER="opencode-zen-free";  MODEL="deepseek-v4-flash-free";  BASE_URL="https://opencode.ai/zen/v1" ;;
+    3) PROVIDER="deepseek-direct";    MODEL="deepseek-v4-flash";       BASE_URL="https://api.deepseek.com" ;;
+    4) PROVIDER="openai";             MODEL="gpt-4o";                  BASE_URL="https://api.openai.com/v1" ;;
+    5) PROVIDER="groq";               MODEL="llama-3.3-70b";          BASE_URL="https://api.groq.com/openai/v1" ;;
+    6)
+      prompt "[Provider name]:"
+      read -r PROVIDER
+      prompt "[Model name]:"
+      read -r MODEL
+      prompt "[Base URL]:"
+      read -r BASE_URL
+      ;;
+    *) warn "Invalid choice, using opencode-zen-free" ;;
+  esac
+
+  # System prompt
+  echo
+  prompt "[System prompt] (default: current):"
+  read -r NEW_PROMPT
+  if [ -n "$NEW_PROMPT" ]; then
+    SYSTEM_PROMPT="$NEW_PROMPT"
+  fi
+
+  # Max context
+  prompt "[Max context tokens] (default: $MAX_CONTEXT):"
+  read -r NEW_CONTEXT
+  if [ -n "$NEW_CONTEXT" ]; then
+    MAX_CONTEXT="$NEW_CONTEXT"
+  fi
+
+  echo
+fi
+
+# ── Ensure API key is set ──────────────────────────────────────────────────
+if [ -z "$API_KEY" ]; then
+  error "API key is required. Provide via --api-key flag or run interactively."
+  echo "  export DEEPSEEK_API_KEY='sk-...'"
+  info "Or set the DEEPSEEK_API_KEY environment variable and re-run."
+  exit 1
+fi
+
+# ── Summary ─────────────────────────────────────────────────────────────────
+header "Configuration Summary"
+echo -e "  ${BOLD}Provider:${NC}     $PROVIDER"
+echo -e "  ${BOLD}Model:${NC}        $MODEL"
+echo -e "  ${BOLD}Base URL:${NC}     $BASE_URL"
+echo -e "  ${BOLD}API Key:${NC}      ${API_KEY:0:8}...${API_KEY: -4}"
+echo -e "  ${BOLD}System Prompt:${NC} ${SYSTEM_PROMPT:0:80}..."
+echo -e "  ${BOLD}Max Context:${NC}   $MAX_CONTEXT"
+echo -e "  ${BOLD}Config File:${NC}   $CONFIG_FILE"
+echo
+
+# Confirm for interactive
+if $INTERACTIVE && ! $ADD_PROVIDER; then
+  prompt "Save this configuration? [Y/n]:"
+  read -r CONFIRM
+  if [[ "$CONFIRM" =~ ^[nN] ]]; then
+    info "Aborted."
+    exit 0
+  fi
+fi
+
+# ── Write config ───────────────────────────────────────────────────────────
+mkdir -p "$(dirname "$CONFIG_FILE")"
+
+# Backup existing config
+if [ -f "$CONFIG_FILE" ]; then
+  BACKUP="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+  cp "$CONFIG_FILE" "$BACKUP"
+  info "Backed up existing config to $BACKUP"
+fi
+
+if $ADD_PROVIDER; then
+  # ── Add a new provider to existing config ──────────────────────────────
+  if [ ! -f "$CONFIG_FILE" ]; then
+    error "No existing config file. Run without --add-provider first."
+    exit 1
+  fi
+
+  # Check if provider already exists
+  if grep -qP "^\s*- name:\s+\"?$PROVIDER\"?" "$CONFIG_FILE" 2>/dev/null; then
+    warn "Provider '$PROVIDER' already exists. Updating..."
+    # Use awk to find and update the provider block
+    awk -v prov="$PROVIDER" -v model="$MODEL" -v base_url="$BASE_URL" -v api_key="$API_KEY" '
+      BEGIN { in_providers=0; found=0; skip=0; }
+      /^[[:space:]]+providers:/ { in_providers=1; print; next; }
+      /^providers:/ { in_providers=1; print; next; }
+      in_providers && /^[a-zA-Z_]/ { in_providers=0; print; next; }
+      in_providers && /[[:space:]]*- name:/ {
+        name = $0;
+        gsub(/^[[:space:]]*- name:[[:space:]]*"?/, "", name);
+        gsub(/"?$/, "", name);
+        if (name == prov) {
+          found=1;
+          print "    - name: \"" prov "\"";
+          print "      model: \"" model "\"";
+          print "      base_url: \"" base_url "\"";
+          print "      api_key: \"" api_key "\"";
+          skip=3;  # skip next 3 lines (model, base_url, api_key)
+          next;
+        }
+        print;
+        next;
+      }
+      in_providers && found && skip > 0 { skip--; next; }
+      { print; }
+    ' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+
+    # If awk didn't find it (maybe format mismatch), append instead
+    if ! grep -qP "^\s*- name:\s+\"?$PROVIDER\"?" "$CONFIG_FILE" 2>/dev/null; then
+      echo "    - name: \"$PROVIDER\"" >> "$CONFIG_FILE"
+      echo "      model: \"$MODEL\"" >> "$CONFIG_FILE"
+      echo "      base_url: \"$BASE_URL\"" >> "$CONFIG_FILE"
+      echo "      api_key: \"$API_KEY\"" >> "$CONFIG_FILE"
+    fi
+  else
+    # Append new provider block before the 'ui:' section or at end
+    has_ui=$(grep -c "^ui:" "$CONFIG_FILE" 2>/dev/null || echo 0)
+    if [ "$has_ui" -gt 0 ]; then
+      # Insert before 'ui:'
+      awk '
+        /^ui:/ {
+          print "    - name: \"'"$PROVIDER"'\"";
+          print "      model: \"'"$MODEL"'\"";
+          print "      base_url: \"'"$BASE_URL"'\"";
+          print "      api_key: \"'"$API_KEY"'\"";
+          print;
+          next;
+        }
+        { print; }
+      ' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    else
+      # Append at end
+      echo "    - name: \"$PROVIDER\"" >> "$CONFIG_FILE"
+      echo "      model: \"$MODEL\"" >> "$CONFIG_FILE"
+      echo "      base_url: \"$BASE_URL\"" >> "$CONFIG_FILE"
+      echo "      api_key: \"$API_KEY\"" >> "$CONFIG_FILE"
+    fi
+  fi
+
+  info "Provider '$PROVIDER' added/updated in $CONFIG_FILE"
+else
+  # ── Write full config ──────────────────────────────────────────────────
+  cat > "$CONFIG_FILE" <<YAMLEOF
+agent:
+  default_model: "$MODEL"
+  default_base_url: "$BASE_URL"
+  system_prompt: "$SYSTEM_PROMPT"
+  max_context: $MAX_CONTEXT
+  providers:
+    - name: "$PROVIDER"
+      model: "$MODEL"
+      base_url: "$BASE_URL"
+      api_key: "$API_KEY"
+
+ui:
+  theme: "default"
+  show_memory: true
+  show_thinking: true
+  max_messages: 500
+  timezone: "Local"
+
+memory:
+  max_short_term: 50
+  max_long_term: 1000
+  decay_rate: 0.01
+
+mcp:
+  enabled: false
+  servers: []
+
+session:
+  auto_save: true
+  save_dir: "$HOME/.eling/sessions"
+YAMLEOF
+
+  info "Configuration written to $CONFIG_FILE"
+fi
+
+echo
+header "Setup Complete! 🎉"
+echo -e "  Run ${BOLD}./eling${NC} to start ELING with your new configuration."
+echo -e "  Run ${BOLD}./eling-setup --list${NC} to view your config."
+echo -e "  Run ${BOLD}./eling-setup${NC} again to reconfigure."
+echo
+
+# ── Test config (interactive only) ─────────────────────────────────────────
+if $INTERACTIVE; then
+  prompt "Test the configuration by making a quick API call? [Y/n]:"
+  read -r TEST_CHOICE
+  if [[ ! "$TEST_CHOICE" =~ ^[nN] ]]; then
+    echo
+    info "Testing API connection..."
+    HTTP_CODE=""
+    BODY=""
+    RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/chat/completions" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $API_KEY" \
+      -d "{
+        \"model\": \"$MODEL\",
+        \"messages\": [{\"role\": \"user\", \"content\": \"Say 'Hello from ELING!' in one sentence.\"}],
+        \"max_tokens\": 50
+      }" 2>/dev/null || echo "curl failed")
+    
+    HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+    BODY=$(echo "$RESPONSE" | sed '$d')
+    
+    if [ "$HTTP_CODE" = "200" ]; then
+      # Try to extract content, fallback to success message
+      CONTENT=$(echo "$BODY" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data['choices'][0]['message']['content'])
+except Exception:
+    print('Connected successfully!')
+" 2>/dev/null || echo "Connected successfully!")
+      echo -e "${GREEN}✓ API connection successful!${NC}"
+      echo -e "  Response: $CONTENT"
+    else
+      warn "API connection test returned HTTP $HTTP_CODE"
+      echo "  Response: $BODY" | head -5
+      info "You may still use ELING. The config file has been saved."
+    fi
+  fi
+fi
