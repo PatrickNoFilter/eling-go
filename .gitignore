@@ -4,26 +4,38 @@ eling_new
 eling_rebuild
 eling-linux-*
 eling-darwin-*
+eling-bin
+eling-new
+eling-new-build
+eling_new_build
+eling_test_build
+eling.bak.*
 
 # Backup archives
 *.zip
+*.bak
+*.tar.gz
+*.tar
+backups/
 
-# Go workspace
-go.work
-go.work.sum
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
 
 # IDE
 .idea/
 .vscode/
-*.swp
-*.swo
+*.sublime-*
 
-# OS
-.DS_Store
-Thumbs.db
+# Go workspace
+go.work
+go.work.sum
+vendor/
 
 # Dependencies
-vendor/
 node_modules/
 
 # Cache
@@ -35,3 +47,12 @@ __pycache__/
 # Environment
 .env
 .env.local
+*.env
+
+# Config with secrets
+*_config.yaml
+config.yaml
+
+# Logs
+*.log
+logs/
