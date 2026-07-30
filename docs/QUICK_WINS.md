@@ -37,12 +37,38 @@
 
 **New tool:** Meta-skill that documents the codebase analysis tools available via the codebase-memory-mcp integration.
 
-## 8. Fixed Memory Race Condition
+## 8. Major Consolidation — Reduced Duplicate Functionality (~540 lines removed)
 
-**Before:** `StartDecay` could panic by closing an already-closed channel. `StopDecay` could panic on double-close.
+**Scope:** Four groups of duplicate/redundant functionality were consolidated across the codebase:
 
-**After:** Both `StartDecay` and `StopDecay` use a safe close pattern with a select guard to prevent double-close panics.
+### A. Dead Code & Skills
+- **Removed:** `internal/skills/` package (Go package `skills` completely gone)
+- **Moved:** MCP skill from old `skills` package to `internal/mcp/skill/skill.go` (package `mcpskill`)
+- **Removed:** `SkillManager` struct — `ListSkills()` now returns `[]tools.Tool` from the ToolRegistry (`category:"skill"`)
+- **Simplified:** `main.go` imports `mcpskill` directly — 7 references updated
+
+### B. Auto-Learning Unified
+- **Renamed:** `learnFromExchange()` → `autoLearn()` (single LLM-based skill learning function)
+- **Removed:** Old pattern-based `autoLearn()` (the Python port replaced the legacy heuristic)
+- **Removed:** `detectPromptType()` — no longer needed after unification
+
+### C. Memory Consolidation
+- **Removed:** `saveConversationToMemory()` + `AddAssistantMessage` + `AddUserMessage` + `NewConversation` — conversation saving handled automatically by Brain's Facts layer
+- **Removed:** `StartDecay()` / `StopDecay()` from in-memory memory — unified under `FactsLayer.ApplyDecay()` (SQL exponential time-decay)
+- **No race conditions:** The old in-memory decay had channel-close race conditions; SQL-based decay is thread-safe
+
+### D. Semantic Search Integration
+- **Added:** `BrainQuery` hook injected into the 8-layer Brain — semantic search now queries all layers via RRF fusion
+- **Removed:** 6 dead functions: `searchMemoryItems`, `MemoryItemData`, `ItemsData`, `SetMemoryItems`, `SemanticIndexSave`, `SemanticIndexLoad`
+- **Retained:** `AddToSemanticIndex` (needed by the `semantic_index` tool)
+- **Local fallback preserved:** Trigram-based fallback still in place for offline operation
+
+**Impact:** ~540 lines removed, ~482 lines moved/relocated, ~50 lines added. Zero external behavior changes. `go build ./...` compiles clean.
 
 ## 9. Created Documentation
 
 **Added:** `docs/README.md` with architecture overview and project structure documentation.
+**Added:** `docs/ARCHITECTURE.md` (564 lines) — full system architecture, pipeline flow, thread safety model.
+**Added:** `docs/API.md` — configuration schema, CLI flags, provider API compatibility, state storage.
+**Added:** `docs/DEVELOPMENT.md` — developer setup, workflow, adding tools, thread safety guidelines.
+**Added:** `docs/TOOLS.md` — complete reference for all 20+ built-in tools.

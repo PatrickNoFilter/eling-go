@@ -25,12 +25,12 @@ Inspired by [jcode](https://github.com/1jehuang/jcode) and battle-tested with **
 | Feature | Details |
 |---------|---------|
 | **Short-Term Memory** | Recent conversation context window |
-| **Long-Term Memory** | Persistent store with strength decay and automatic forgetting |
-| **Semantic Search** | Vector embedding-based meaning search (OpenAI-compatible embeddings) |
-| **Auto-Learning** | Extracts patterns from interactions; learns reusable skills |
-| **LLM Skill Learning** | `learnFromExchange` — LLM judges if a response is worth memorizing |
-| **Conversation Indexing** | Every turn saved to semantic index for future recall |
-| **Memory Decay** | Unused memories weaken over time and are pruned |
+| **Long-Term Memory** | Persistent store with FactsLayer (SQLite + BM25 FTS5) and trust scoring |
+| **🧠 8-Layer Brain** | Builtin · Blackbox · Facts · Code · KB · Obsidian · Notion · Continuum — fused via RRF |
+| **Semantic Search** | Vector embedding-based meaning search via BrainQuery hook (RRF fusion across all layers) + local trigram fallback |
+| **Auto-Learning** | `autoLearn()` — LLM judges if a response is worth memorizing as a reusable skill |
+| **Conversation Indexing** | Every turn indexed via Brain's Facts layer (automatic, no separate config needed) |
+| **Memory Decay** | FactsLayer.ApplyDecay() — exponential time-decay on SQL data (unified, no duplicate in-memory decay) |
 
 ### 🏗️ 8-Layer Memory Architecture (Adapted from [PatrickNoFilter/eling](https://github.com/PatrickNoFilter/eling))
 
@@ -232,70 +232,84 @@ edit(path=file.go, old_string=old code, new_string=new code)
 
 ```
 eling/
-├── main.go                        # Entry point, CLI flags, crash handling
+├── main.go                        # Entry point — CLI flags, signal handling, crash detection
 ├── go.mod / go.sum                # Go module dependencies
 ├── README.md                      # This file
 ├── DESIGN.md                      # Architecture design overview
 ├── eling-wizard.sh                # Interactive setup wizard
 ├── start.sh                       # Quick start script
-├── test_rotation.sh               # API key rotation test
 ├── docs/
 │   ├── README.md                  # Documentation index
+│   ├── ARCHITECTURE.md            # Full system architecture (564 lines)
+│   ├── API.md                     # Config schema, CLI flags, provider compatibility
+│   ├── DEVELOPMENT.md             # Developer guide
+│   ├── TOOLS.md                   # Complete tool reference (20+ tools)
 │   ├── QUICK_WINS.md              # Recent improvements log
 │   └── hermes-skills-adaptation.md
 ├── internal/
 │   ├── agent/
-│   │   ├── agent.go               # Core agent: Ask, streaming, tool loop, auto-learn, sessions
-│   │   ├── memory.go              # Memory system: short/long-term, strength decay, recall
-│   │   ├── memory_test.go         # Memory tests
-│   │   └── save_conversation_test.go
+│   │   ├── agent.go               # Core agent: Ask, streaming, tool loop, autoLearn, sessions
+│   │   ├── memory.go              # Memory: short/long-term, recall, FactsLayer-backed decay
+│   │   └── memory_test.go         # Memory unit tests
+│   ├── cli/
+│   │   └── cli.go                 # CLI subcommand handling
 │   ├── config/
-│   │   └── config.go              # YAML config loader, default config, provider config
-│   ├── layers/                    # 🧠 8-Layer Memory Architecture (adapted from Python eling)
+│   │   └── config.go              # YAML config loader, defaults, provider config
+│   ├── layers/                    # 🧠 8-Layer Memory Architecture (RRF fusion)
 │   │   ├── layers.go              # Layer interface, Brain orchestrator, RRF fusion
 │   │   ├── builtin.go             # Layer 1: MEMORY.md / USER.md (always-on)
-│   │   ├── blackbox.go            # Layer 2: Flight recorder + telemetry + 11-metric scoring
+│   │   ├── blackbox.go            # Layer 2: Flight recorder + 11-metric scoring
 │   │   ├── facts.go               # Layer 3: SQLite + BM25 hybrid with trust scoring
 │   │   ├── code.go                # Layer 4: Codegraph symbol intelligence
 │   │   ├── kb.go                  # Layer 5: FTS5 knowledge corpus
 │   │   ├── obsidian.go            # Layer 6: Local Markdown vault access
 │   │   ├── notion.go              # Layer 7: Notion API sync (optional)
-│   │   └── continuum.go           # Layer 8: Multi-agent orchestration hub
+│   │   ├── continuum.go           # Layer 8: Multi-agent orchestration hub
+│   │   ├── hooks.go               # BrainQuery hook interface (semantic search integration)
+│   │   ├── think.go               # HRR reasoning engine
+│   │   ├── privacy.go             # Privacy filtering for memory layers
+│   │   ├── rules.go               # Rule-based memory filtering
+│   │   ├── snapshot.go            # Brain state snapshots
+│   │   ├── spec_kit.go            # Specification toolkit
+│   │   └── verify_on_stop.go      # Stop-time verification
 │   ├── logger/
 │   │   ├── logger.go              # Crash-safe logger, signal handling, crash reports
 │   │   └── logger_test.go
+│   ├── markdownify/
+│   │   └── markdownify.go         # HTML/document to Markdown converter
 │   ├── mcp/
-│   │   └── mcp.go                 # MCP client (JSON-RPC 2.0 stdio), server manager
+│   │   ├── mcp.go                 # MCP client (JSON-RPC 2.0 stdio), server manager
+│   │   ├── skill/
+│   │   │   └── skill.go           # MCP skill tool (package mcpskill)
+│   │   └── srv/
+│   │       └── server.go          # MCP server implementation
 │   ├── provider/
-│   │   ├── deepseek.go            # Multi-provider LLM client, retry, fallback, rotation
+│   │   ├── deepseek.go            # Multi-provider LLM client, retry, fallback, key rotation
 │   │   └── rotation_test.go       # Key rotation tests
 │   ├── session/
 │   │   └── session.go             # Session save/resume, manager, metadata
-│   ├── skills/
-│   │   ├── skills.go              # Plugin/skill manager (legacy)
-│   │   └── skills_test.go
 │   ├── tools/
-│   │   ├── registry.go            # Dynamic tool registry (thread-safe)
-│   │   ├── bash.go                # Bash execution with timeout
-│   │   ├── files.go               # read/write/edit/grep/ls
-│   │   ├── web.go                 # web_search + web_fetch (curl-based)
+│   │   ├── registry.go            # Dynamic tool registry (thread-safe, category-aware)
+│   │   ├── bash.go                # Shell execution with timeout + output limits
+│   │   ├── files.go               # read / write / edit / grep / ls
+│   │   ├── web.go                 # web_search + web_fetch (curl-based, fallback)
 │   │   ├── register.go            # Dynamic tool/skill registration
 │   │   ├── backup.go              # create_backup + codebase-intelligence
 │   │   ├── schema.go              # JSON parameter schemas for all tools
-│   │   ├── semantic.go            # Vector embedding search engine
+│   │   ├── semantic.go            # Semantic search (BrainQuery + local trigram)
 │   │   ├── setup.go               # eling_setup tool (config management)
 │   │   ├── ocr.go                 # Open Code Review integration
-│   │   ├── register_test.go
-│   │   └── rotation.go            # API key rotation tool (deprecated)
+│   │   └── register_test.go       # Registration tests
 │   └── tui/
-│       └── tui.go                 # 3-panel Bubbletea TUI (1344 lines)
+│       └── tui.go                 # 3-panel Bubbletea TUI
 ├── skills/
-│   └── hermes/                    # Community skill scripts
+│   └── hermes/                    # Community skill scripts (hermes skills)
 │       ├── deep-web-research.sh
 │       ├── interactive-prompt-analyzer.sh
 │       └── ...
 └── scripts/
-    └── install-hermes-skills.sh
+    ├── install-hermes-skills.sh
+    └── agent-integration/         # Agent integration tools
 ```
 
 ---
@@ -314,8 +328,7 @@ agent:
   max_turn_duration: 0            # Wall-clock timeout (0 = no timeout)
   max_turn_duration_retries: 2   # Retries on timeout
   auto_test: true                 # Auto-run go test on touched files
-  learn_from_exchange: true       # LLM-based skill learning
-  save_conversation: true         # Index every turn to semantic search
+  learn_from_exchange: true       # LLM-based skill learning (autoLearn)
   providers:
     - name: "opencode-zen"
       model: "deepseek-v4-flash"
@@ -355,9 +368,9 @@ All state is persisted to `~/.eling/`:
 - `evolutions.json` — Evolution history
 - `summary.txt` — Compressed conversation summary
 - `tools.json` — Dynamic tool registrations
-- `semantic_index.json` — Vector embeddings for semantic search
 - `turn_timeout_history.json` — Self-adaptive timeout data
 - `sessions/` — Saved conversation sessions
+- `*-brain.db` — Brain layer databases (facts, code, kb, blackbox, continuum)
 - `eling.log` — Application log
 - `crash_report.log` — Panic/bus error crash reports
 - `eling.pid` — PID file for single-instance enforcement
@@ -486,15 +499,15 @@ ocr_health                                     # Check status
 │  ┌──────────┬──────────────┬────────────────┬──────────┐ │
 │  │Provider  │ Memory       │ Tool Registry  │ Sessions │ │
 │  │Manager   │ Short+Long   │ (Dynamic,      │ Save/    │ │
-│  │(Multi)   │ Term, Decay, │ Thread-safe)   │ Resume   │ │
-│  │          │ Embeddings   │ 22+ tools      │          │ │
+│  │(Multi)   │ Term, Brain  │ Thread-safe)   │ Resume   │ │
+│  │          │ 8-Layer RRF  │ 20+ tools      │          │ │
 │  ├──────────┴──────┬───────┴────────────────┴──────────┤ │
 │  │  🧠 8-Layer Brain (RRF Fusion)                      │ │
 │  │  Builtin · Blackbox · Facts · Code · KB             │ │
 │  │  Obsidian · Notion · Continuum                      │ │
 │  ├─────────────────┬───────────────────────────────────┤ │
-│  │  MCP Client (JSON-RPC 2.0) | Config (YAML)          │ │
-│  │  Auto-Learning | Evolution | Crash Recovery         │ │
+│  │  MCP Client (JSON-RPC 2.0) · mcpskill tool          │ │
+│  │  Auto-Learning (autoLearn) | Evolution               │ │
 │  │  Self-Adaptive Timeout | Key Rotation               │ │
 │  └─────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────┘
@@ -507,6 +520,9 @@ ocr_health                                     # Check status
 3. **Bounded memory**: Tool output capped at 512 KiB, tool results at 256 KiB, context window managed by token budget
 4. **Self-healing**: Auto-retry with exponential backoff, provider fallback, key rotation, adaptive timeout
 5. **No context loss**: Ctrl+C saves conversation state; interrupted prompts are preserved
+6. **8-Layer Brain with RRF fusion**: All memory searches query every layer and fuse results using Reciprocal Rank Fusion — the same algorithm adapted from the Python eling
+7. **Unified skill management**: `ListSkills()` returns `[]tools.Tool` from the ToolRegistry (`category:"skill"`) — no separate `SkillManager`
+8. **No duplicate memory decay**: FactsLayer.ApplyDecay() handles all memory decay; the old in-memory `StartDecay()`/`StopDecay()` were removed during consolidation
 
 ---
 

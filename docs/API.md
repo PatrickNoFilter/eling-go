@@ -21,8 +21,8 @@ agent:
 
   # ── Auto Features ──
   auto_test: true                               # Auto-run go test on touched files
-  learn_from_exchange: true                     # LLM-based skill learning from conversations
-  save_conversation: true                       # Save every turn to semantic search index
+  learn_from_exchange: true                     # LLM-based skill learning from conversations (maps to autoLearn())
+  save_conversation: true                       # [Legacy] Conversation saving handled automatically by Brain's Facts layer
 
   # ── Providers ──
   providers:
@@ -130,8 +130,8 @@ All state is persisted under `~/.eling/`:
 | `evolutions.json` | Evolution history | JSON |
 | `summary.txt` | Compressed conversation summary | Text |
 | `tools.json` | Dynamic tool registrations | JSON |
-| `semantic_index.json` | Vector embeddings + metadata | JSON |
 | `turn_timeout_history.json` | Self-adaptive timeout data | JSON |
+| `*-brain.db` | Brain layer databases (facts, code, kb, blackbox, continuum) | SQLite |
 | `sessions/*.json` | Saved conversation sessions | JSON |
 | `eling.log` | Application log | Text |
 | `crash_report.log` | Panic/bus error crash reports | Text |

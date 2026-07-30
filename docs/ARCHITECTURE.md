@@ -20,7 +20,7 @@ ELING follows a **modular layered architecture** with clear separation of concer
 │  │                                                         │   │
 │  │  buildContext() → buildMessages() → runToolLoop()        │   │
 │  │                                        ↓                 │   │
-│  │  autoLearn() ← learnFromExchange() ← saveConversation   │   │
+│  │  autoLearn() ← LLM skill learning                        │   │
 │  │  updateConversationSummary()                            │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
@@ -31,7 +31,7 @@ ELING follows a **modular layered architecture** with clear separation of concer
 │  └────────────┴──────────────┴────────────────┴──────────────┘  │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  Subsystems: MCP Client · Skill Manager · Config         │   │
+│  │  Subsystems: MCP Client · mcpskill · Brain (8-Layer)    │   │
 │  │  Auto-Learning · Evolution · Turn Timeout History        │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────┘
@@ -121,9 +121,7 @@ runToolLoop(ctx, prov, messages, toolDefs, maxDuration)
     └── On success:
         ├── Record turn duration (for future prediction)
         ├── Save to session (user + assistant entries)
-        ├── autoLearn() — pattern extraction
-        ├── learnFromExchange() — LLM skill learning
-        ├── saveConversationToMemory() — semantic indexing
+        ├── autoLearn() — LLM judges if response is worth memorizing as a skill
         └── updateConversationSummary() — context compression
 ```
 
@@ -222,16 +220,14 @@ Token Budget = MaxContext (default 32768)
 | `Remember(content, category, tags)` | Store new item → short-term → overflow to long-term | Write |
 | `Recall(query)` | Search by substring or tag match | Write (strength boost) |
 | `Recent(n)` | Return last n items (deep copy) | Read |
-| `ItemsData()` | Flat slice for semantic indexing | Read |
+| `Len()` | Total item count | Read |
+| `Stats()` | Memory usage statistics | Read |
 | `forgetWeakest()` | Remove bottom 10% by strength | Write |
-| `StartDecay(interval, rate)` | Background goroutine, periodic strength reduction | Write |
-| `StopDecay()` | Halt background decay | Write |
 
 ### Thread Safety
 - `sync.RWMutex` on all operations
 - `Recent()` returns deep copies to prevent slice aliasing
-- `ItemsData()` used for semantic search export (safe concurrent read)
-- Decay goroutine checks cancellation context before each tick
+- Decay is handled by FactsLayer.ApplyDecay() (SQL-level, not in-memory)
 
 ---
 

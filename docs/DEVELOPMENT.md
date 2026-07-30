@@ -35,41 +35,62 @@ eling/
 ├── main.go                    # Entry point — CLI, flags, signals, crash handling
 ├── internal/
 │   ├── agent/                 # Core AI agent
-│   │   ├── agent.go          # Ask, AskStream, tool loop, auto-learn, sessions
-│   │   ├── memory.go          # Memory system (short/long term, decay)
+│   │   ├── agent.go          # Ask, AskStream, tool loop, autoLearn, sessions
+│   │   ├── memory.go          # Memory system (short/long term, FactsLayer decay)
 │   │   └── memory_test.go     # Memory unit tests
+│   ├── cli/                   # CLI subcommand handling
+│   │   └── cli.go             # Subcommand dispatch
 │   ├── config/                # Configuration management
 │   │   └── config.go          # YAML loading, saving, defaults
+│   ├── layers/                # 🧠 8-Layer Memory Architecture (RRF fusion)
+│   │   ├── layers.go          # Layer interface, Brain orchestrator, RRF fusion
+│   │   ├── builtin.go         # Layer 1: MEMORY.md / USER.md (always-on)
+│   │   ├── blackbox.go        # Layer 2: Flight recorder + 11-metric scoring
+│   │   ├── facts.go           # Layer 3: SQLite + BM25 hybrid with trust scoring
+│   │   ├── code.go            # Layer 4: Codegraph symbol intelligence
+│   │   ├── kb.go              # Layer 5: FTS5 knowledge corpus
+│   │   ├── obsidian.go        # Layer 6: Local Markdown vault access
+│   │   ├── notion.go          # Layer 7: Notion API sync (optional)
+│   │   ├── continuum.go       # Layer 8: Multi-agent orchestration hub
+│   │   ├── hooks.go           # BrainQuery hook (semantic search integration)
+│   │   ├── think.go           # HRR reasoning engine
+│   │   ├── privacy.go         # Privacy filtering
+│   │   ├── rules.go           # Rule-based filtering
+│   │   ├── snapshot.go        # Brain state snapshots
+│   │   └── spec_kit.go        # Specification toolkit
 │   ├── logger/                # Crash-safe logging system
 │   │   ├── logger.go          # Logger, crash detection, signal handling
 │   │   └── logger_test.go     # Logger tests
-│   ├── mcp/                   # Model Context Protocol client
-│   │   └── mcp.go             # JSON-RPC 2.0 over stdio, server management
+│   ├── markdownify/           # Document conversion
+│   │   └── markdownify.go     # HTML/document to Markdown converter
+│   ├── mcp/                   # Model Context Protocol
+│   │   ├── mcp.go             # MCP client (JSON-RPC 2.0 stdio)
+│   │   ├── skill/             # MCP skill tool (package mcpskill)
+│   │   │   └── skill.go
+│   │   └── srv/               # MCP server implementation
+│   │       └── server.go
 │   ├── provider/              # LLM provider abstraction
-│   │   ├── deepseek.go        # Multi-provider client, retry, key rotation
+│   │   ├── deepseek.go        # Multi-provider client, retry, key rotation, fallback
 │   │   └── rotation_test.go   # Key rotation tests
 │   ├── session/               # Session persistence
 │   │   └── session.go         # Named sessions, save/resume, metadata
-│   ├── skills/                # Legacy plugin/skill system
-│   │   ├── skills.go          # Skill manager
-│   │   └── skills_test.go     # Skill tests
-│   ├── tools/                 # Dynamic tool system
-│   │   ├── registry.go        # Thread-safe tool registry
+│   ├── tools/                 # Dynamic tool system (thread-safe registry)
+│   │   ├── registry.go        # Category-aware tool registry
 │   │   ├── bash.go            # Shell execution tool
 │   │   ├── files.go           # File read/write/edit/grep/ls
 │   │   ├── web.go             # Web search/fetch tools
 │   │   ├── register.go        # Dynamic tool/skill registration
 │   │   ├── backup.go          # Backup & intelligence tools
 │   │   ├── schema.go          # JSON parameter schemas
-│   │   ├── semantic.go        # Vector embedding search engine
+│   │   ├── semantic.go        # Semantic search (BrainQuery + local trigram)
 │   │   ├── setup.go           # Config management tool
 │   │   ├── ocr.go             # Open Code Review tools
 │   │   └── register_test.go   # Registration tests
 │   └── tui/                   # Terminal UI
 │       └── tui.go             # Bubbletea 3-panel TUI
-├── docs/                      # Documentation
-├── skills/                    # Community skill scripts
-└── scripts/                   # Utility scripts
+├── docs/                      # Documentation (ARCHITECTURE.md, API.md, DEVELOPMENT.md, TOOLS.md, etc.)
+├── skills/                    # Community skill scripts (hermes)
+└── scripts/                   # Utility scripts (install-hermes-skills.sh, agent-integration/)
 ```
 
 ---
@@ -336,7 +357,7 @@ git push origin v1.0.0
 | **Tool results** | Cap at 256 KiB with rune-aware truncation |
 | **Messages** | Trim tool loop to max 100 messages |
 | **Memory** | Cap at `MaxLongTerm` (default 1000) |
-| **Skills** | Cap at 100 learned skills |
+| **Tool registry** | Skills stored as tools with `category:"skill"` in ToolRegistry |
 | **Evolutions** | Cap at 1000 entries |
 | **Timeout history** | Cap at 100 records |
 | **Embedding cache** | Cap at 1000 entries |

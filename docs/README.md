@@ -12,12 +12,13 @@ Welcome to the ELING documentation. ELING is an auto-learning evolving AI agent 
 - **[DESIGN.md](../DESIGN.md)** — Original architecture design overview
 
 ### 🛠 Reference
-- **[TOOLS.md](TOOLS.md)** — Complete reference for all 22+ built-in tools
+- **[TOOLS.md](TOOLS.md)** — Complete reference for all 20+ built-in tools
 - **[API.md](API.md)** — Configuration schema, CLI flags, provider API compatibility, state storage
 
 ### 👩‍💻 Development
 - **[DEVELOPMENT.md](DEVELOPMENT.md)** — Setup, workflow, adding tools, thread safety, debugging
 - **[QUICK_WINS.md](QUICK_WINS.md)** — Recent improvements and changelog
+- **[🎯 Recommended Consolidations.md](../🎯%20Recommended%20Consolidations.md)** — Duplicate reduction and optimization plan (executed)
 
 ### 📋 Sessions & State
 - Sessions are saved as JSON in `~/.eling/sessions/`
