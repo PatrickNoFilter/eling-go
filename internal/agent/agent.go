@@ -624,6 +624,7 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 			})
 
 			result, execErr := a.ToolRegistry.Execute(tc.Function.Name, args)
+			a.incrementSkillUsedCount(tc.Function.Name)
 			var resultText string
 			if execErr != nil {
 				resultText = fmt.Sprintf("Error: %v", execErr)
@@ -1207,6 +1208,7 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 			})
 
 			result, execErr := a.ToolRegistry.Execute(tc.Function.Name, args)
+			a.incrementSkillUsedCount(tc.Function.Name)
 			var resultText string
 			if execErr != nil {
 				resultText = fmt.Sprintf("Error: %v", execErr)
@@ -1397,7 +1399,21 @@ func (a *Agent) estimateTurnDuration(prompt string) int {
 
 // UseTool executes a tool by name.
 func (a *Agent) UseTool(name string, args map[string]interface{}) (interface{}, error) {
-	return a.ToolRegistry.Execute(name, args)
+	result, err := a.ToolRegistry.Execute(name, args)
+	a.incrementSkillUsedCount(name)
+	return result, err
+}
+
+// incrementSkillUsedCount increments the UsedCount for a skill tool when it gets called.
+func (a *Agent) incrementSkillUsedCount(name string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.skills {
+		if a.skills[i].Name == name {
+			a.skills[i].UsedCount++
+			break
+		}
+	}
 }
 
 // GetMemory returns the agent's memory.
@@ -1660,6 +1676,24 @@ func (a *Agent) LoadState() error {
 		var ls []LearnedSkill
 		if err := json.Unmarshal(skillData, &ls); err == nil {
 			a.skills = ls
+			// Re-register all loaded skills into the tool registry so the LLM can call them
+			for _, s := range a.skills {
+				if _, exists := a.ToolRegistry.Get(s.Name); !exists {
+					skillCopy := s
+					a.ToolRegistry.Register(tools.Tool{
+						Name:        skillCopy.Name,
+						Description: skillCopy.Description,
+						Version:     "1.0.0",
+						Category:    "skill",
+						Execute: func(args map[string]interface{}) (interface{}, error) {
+							return tools.OK(map[string]interface{}{
+								"skill":   skillCopy.Name,
+								"message": fmt.Sprintf("Skill %q executed — follow the description guidance", skillCopy.Name),
+							}), nil
+						},
+					})
+				}
+			}
 		}
 	}
 
@@ -2196,15 +2230,7 @@ func (a *Agent) autoLearn(prompt, response string) {
 		return
 	}
 
-	// Limit skills to prevent unbounded growth
-	a.mu.Lock()
-	skillCount := len(a.skills)
-	a.mu.Unlock()
-	if skillCount >= 100 {
-		return
-	}
-
-	// Build the skill-learning prompt (same as Python version)
+	// Build the skill-learning prompt
 	truncPrompt := TruncateStr(prompt, 2000)
 	truncResponse := TruncateStr(response, 2000)
 
@@ -2293,6 +2319,26 @@ If learn is false: {"learn": false}`
 		}
 	}
 
+	// Rotate out oldest/least-used skill if at capacity
+	const maxSkills = 100
+	if len(a.skills) >= maxSkills {
+		// Find the skill to evict: lowest UsedCount, then oldest LearnedAt
+		evictIdx := 0
+		for i := 1; i < len(a.skills); i++ {
+			if a.skills[i].UsedCount < a.skills[evictIdx].UsedCount ||
+				(a.skills[i].UsedCount == a.skills[evictIdx].UsedCount && a.skills[i].LearnedAt.Before(a.skills[evictIdx].LearnedAt)) {
+				evictIdx = i
+			}
+		}
+		evicted := a.skills[evictIdx]
+		a.skills = append(a.skills[:evictIdx], a.skills[evictIdx+1:]...)
+		log.Printf("autoLearn: rotated out skill %q (used=%d, learned=%s) to make room for %q",
+			evicted.Name, evicted.UsedCount, evicted.LearnedAt.Format("2006-01-02"), name)
+
+		// Also remove from tool registry if present
+		a.ToolRegistry.Unregister(evicted.Name)
+	}
+
 	// Learn the new skill
 	skill := LearnedSkill{
 		Name:        name,
@@ -2320,6 +2366,12 @@ If learn is false: {"learn": false}`
 					"message": fmt.Sprintf("Skill %q executed — follow the body guidance", skillCopy.Name),
 				}), nil
 			},
+		})
+		// Persist as dynamic tool so it survives restart
+		tools.AddDynamicTool(tools.DynamicTool{
+			Name:        skillCopy.Name,
+			Description: TruncateStr(bodyCopy, 80),
+			Category:    "skill",
 		})
 	}
 

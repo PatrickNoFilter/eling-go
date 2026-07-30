@@ -1179,7 +1179,7 @@ func (m Model) View() string {
 			elapsedStr = fmt.Sprintf(" ⏱ %ds", int(elapsed.Seconds()))
 		}
 	}
-	header := hdrSty.Render(fmt.Sprintf(" %s%s  M%d T%d S%d",
+	header := hdrSty.Render(fmt.Sprintf(" %s%s  Memory %d  Tools %d  Skills %d",
 		clock, elapsedStr, s["memory_items"], s["tools_available"], s["learned_skills"]))
 
 	// Agent name shown above the input area, with spinner before and token info after

@@ -229,32 +229,17 @@ Dynamically create a new bash-wrapping tool the agent can call.
 | `description` | string | ✅ | — | Tool description |
 | `command` | string | ❌* | — | Bash command to execute |
 | `script` | string | ❌* | — | Inline bash script |
-| `category` | string | ❌ | `dynamic` | Tool category |
+| `type` | string | ❌ | `tool` | Registration type: `tool` (dynamic tool) or `skill` (appears in skill list) |
+| `category` | string | ❌ | `dynamic` | Tool category (overridden to `skill` when `type=skill`) |
 
-*\* Either `command` or `script` is required.*
+*\* Either `command` or `script` is required (not needed for `type=skill`).*
 
 **Environment variables passed to command:** `ELING_ARG_NAME=VALUE` for each argument key-value pair.
 
-**Example:**
+**Examples:**
 ```
 register_tool(name=weather, description=Get weather for a city, command=curl -s "wttr.in/$1?format=%C+%t")
-```
-
----
-
-### `register_skill`
-Register a named skill/plugin.
-
-**Parameters:**
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `name` | string | ✅ | — | Skill name |
-| `description` | string | ✅ | — | Skill description |
-| `command` | string | ❌ | — | Optional bash command |
-
-**Example:**
-```
-register_skill(name=system-health, description=Check system health, command=top -bn1 | head -5)
+register_tool(name=system-health, description=Check system health, type=skill, command=top -bn1 | head -5)
 ```
 
 ---

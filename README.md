@@ -69,8 +69,7 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 | `grep` | Pattern search with regex, file type filter |
 | `web_search` | DuckDuckGo search (with fallback endpoints) |
 | `web_fetch` | URL content fetch via curl |
-| `register_tool` | Dynamically create new bash-wrapping tools at runtime |
-| `register_skill` | Register named skills/plugins |
+| `register_tool` | Dynamically create new bash-wrapping tools (use `type=skill` for skills) |
 | `create_backup` | Timestamped ZIP backups |
 | `semantic_search` | Meaning-based vector search over indexed content |
 | `semantic_index` | Add content to the search index |
@@ -523,6 +522,7 @@ ocr_health                                     # Check status
 6. **8-Layer Brain with RRF fusion**: All memory searches query every layer and fuse results using Reciprocal Rank Fusion — the same algorithm adapted from the Python eling
 7. **Unified skill management**: `ListSkills()` returns `[]tools.Tool` from the ToolRegistry (`category:"skill"`) — no separate `SkillManager`
 8. **No duplicate memory decay**: FactsLayer.ApplyDecay() handles all memory decay; the old in-memory `StartDecay()`/`StopDecay()` were removed during consolidation
+9. **Usage-based skill eviction**: Skills track their `UsedCount` and are evicted by lowest usage (not just age) when the 100-skill cap is reached
 
 ---
 

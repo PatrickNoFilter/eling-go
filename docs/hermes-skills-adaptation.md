@@ -10,7 +10,7 @@ This document describes how the [Hermes Skills Bundle](https://github.com/sloemo
 |--------|-------------|-------|
 | **Skills** | Markdown SKILL.md files with YAML frontmatter | Go-code skills + dynamic tool registration |
 | **Browser** | Kimi WebBridge daemon (port 10086) | Can be wrapped as a tool |
-| **Tools** | Built-in `clarify`, `memory`, `snapshot` etc. | Go-based tool registry with `register_tool` / `register_skill` |
+| **Tools** | Built-in `clarify`, `memory`, `snapshot` etc. | Go-based tool registry with `register_tool` (use `type=skill` for skills) |
 | **Memory** | `~/.hermes/memories/memory.md` | Internal memory + semantic index |
 | **Skill Location** | `~/.hermes/skills/hermes-skills-bundle/` | `/root/eling/skills/` |
 
@@ -18,7 +18,7 @@ This document describes how the [Hermes Skills Bundle](https://github.com/sloemo
 
 ### 1. SKILL.md → ELING Skill Scripts
 
-Each Hermes SKILL.md becomes an ELING-registered skill using `register_skill` or a bash-based tool. The instruction prompts are injected as tool descriptions and executed via bash wrappers.
+Each Hermes SKILL.md becomes an ELING-registered skill using `register_tool` with `type=skill` or a bash-based tool. The instruction prompts are injected as tool descriptions and executed via bash wrappers.
 
 ### 2. Kimi WebBridge → ELING Browser Tool
 

@@ -305,4 +305,4 @@ Used by `semantic_search` and `semantic_index` tools.
 ```
 
 **Caching:** Embeddings are cached in memory (up to 1000 entries) to reduce API calls.
-**Persistence:** Semantic index is saved to `~/.eling/semantic_index.json`.
+**Persistence:** Semantic search queries the 8-layer Brain (SQLite-backed) via RRF fusion, with an in-memory local trigram fallback for offline operation.

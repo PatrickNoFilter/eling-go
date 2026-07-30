@@ -65,6 +65,27 @@
 
 **Impact:** ~540 lines removed, ~482 lines moved/relocated, ~50 lines added. Zero external behavior changes. `go build ./...` compiles clean.
 
+## 10. Skill Auto-Learn Fixes — UsedCount Tracking, Restart Restoration, Persistence
+
+**Three critical fixes to the skill auto-learn system:**
+
+### A. `UsedCount` Now Tracks Actual Usage
+**Before:** `UsedCount` was set to 0 when a skill was created but never incremented. The eviction algorithm always fell back to `LearnedAt` (oldest-first FIFO), ignoring which skills were actually useful.
+
+**After:** `incrementSkillUsedCount()` is called after all 3 tool execution paths (`Ask()`, `runStreamToolLoop()`, `UseTool()`). The eviction algorithm now has meaningful `UsedCount` data — skills that are actually used get priority, and unused skills are evicted first.
+
+### B. Skills Restored into Tool Registry on Restart
+**Before:** `LoadState()` restored `a.skills` from `skills.json` but never re-registered them into the Tool Registry. Learned skills persisted in JSON but became invisible to the LLM after restart.
+
+**After:** In `LoadState()`, after restoring `a.skills`, each skill is registered into `ToolRegistry` as a category `"skill"` tool — exactly like `autoLearn()` does during live learning. Skills are visible and callable after restart.
+
+### C. Auto-Learned Skills Now Persist as Dynamic Tools
+**Before:** `autoLearn()` registered skills in the tool registry but never called `tools.AddDynamicTool()`. Skills were lost on restart because they weren't written to `tools.json`.
+
+**After:** In `autoLearn()`, after registering in the tool registry, the skill is also saved via `tools.AddDynamicTool()` with category `"skill"`. Skills survive application restarts — they're re-loaded from `tools.json` alongside user-defined tools.
+
+**Impact:** The skill system now works end-to-end: skills are learned, tracked by actual usage, survive restarts, and are intelligently evicted (least-used first).
+
 ## 9. Created Documentation
 
 **Added:** `docs/README.md` with architecture overview and project structure documentation.
