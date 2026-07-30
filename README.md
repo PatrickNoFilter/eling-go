@@ -32,6 +32,34 @@ Inspired by [jcode](https://github.com/1jehuang/jcode) and battle-tested with **
 | **Conversation Indexing** | Every turn saved to semantic index for future recall |
 | **Memory Decay** | Unused memories weaken over time and are pruned |
 
+### 🏗️ 8-Layer Memory Architecture (Adapted from [PatrickNoFilter/eling](https://github.com/PatrickNoFilter/eling))
+
+ELING now implements the complete 8-layer memory architecture from the Python eling-agent, ported to Go:
+
+```
+📡 Layer 8: CONTINUUM   — multi-agent orchestration hub (shared continuum.db)
+🧠 Layer 7: NOTION     — online brain, persistent, human-readable (optional)
+📝 Layer 6: OBSIDIAN   — local Markdown vault, project notes, daily logs
+📚 Layer 5: KB         — FTS5 knowledge corpus for long-form knowledge
+🕸️ Layer 4: CODE       — codegraph symbol intelligence
+💎 Layer 3: FACTS      — SQLite + BM25 hybrid with trust scoring
+🔎 Layer 2: BLACKBOX   — flight recorder + telemetry + 11-metric efficiency scoring
+⚡ Layer 1: BUILTIN    — MEMORY.md / USER.md (always-on, zero setup)
+```
+
+| Layer | What it stores | How it's queried | Persistence |
+|------|---------------|-------------------|-------------|
+| **📡 Continuum** | Multi-agent knowledge, agent registry | SQL queries | `continuum.db` — shared across agents |
+| **🧠 Notion** | Permanent pages, project plans (optional) | Notion API | Cloud — human-viewable |
+| **📝 Obsidian** | Local Markdown notes, daily logs | File content search | Local filesystem |
+| **📚 KB** | Articles, docs, long-form knowledge | FTS5 full-text search | Local SQLite |
+| **🕸️ Code** | Function symbols, structs, interfaces | SQL LIKE search | Local SQLite |
+| **💎 Facts** | Short facts, preferences, observations | BM25 FTS5 + optional embeddings | Local SQLite |
+| **🔎 Blackbox** | Agent telemetry events, efficiency scores | SQL queries | Local SQLite |
+| **⚡ Builtin** | Agent identity, user profile | In-memory load | Flat files |
+
+Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the same algorithm used by the Python version — giving you unified search results ranked by relevance across every memory layer.
+
 ### 🛠 Dynamic Tool System
 | Tool | Description |
 |------|-------------|
@@ -223,6 +251,16 @@ eling/
 │   │   └── save_conversation_test.go
 │   ├── config/
 │   │   └── config.go              # YAML config loader, default config, provider config
+│   ├── layers/                    # 🧠 8-Layer Memory Architecture (adapted from Python eling)
+│   │   ├── layers.go              # Layer interface, Brain orchestrator, RRF fusion
+│   │   ├── builtin.go             # Layer 1: MEMORY.md / USER.md (always-on)
+│   │   ├── blackbox.go            # Layer 2: Flight recorder + telemetry + 11-metric scoring
+│   │   ├── facts.go               # Layer 3: SQLite + BM25 hybrid with trust scoring
+│   │   ├── code.go                # Layer 4: Codegraph symbol intelligence
+│   │   ├── kb.go                  # Layer 5: FTS5 knowledge corpus
+│   │   ├── obsidian.go            # Layer 6: Local Markdown vault access
+│   │   ├── notion.go              # Layer 7: Notion API sync (optional)
+│   │   └── continuum.go           # Layer 8: Multi-agent orchestration hub
 │   ├── logger/
 │   │   ├── logger.go              # Crash-safe logger, signal handling, crash reports
 │   │   └── logger_test.go
@@ -450,7 +488,11 @@ ocr_health                                     # Check status
 │  │Manager   │ Short+Long   │ (Dynamic,      │ Save/    │ │
 │  │(Multi)   │ Term, Decay, │ Thread-safe)   │ Resume   │ │
 │  │          │ Embeddings   │ 22+ tools      │          │ │
-│  ├──────────┴──────────────┴────────────────┴──────────┤ │
+│  ├──────────┴──────┬───────┴────────────────┴──────────┤ │
+│  │  🧠 8-Layer Brain (RRF Fusion)                      │ │
+│  │  Builtin · Blackbox · Facts · Code · KB             │ │
+│  │  Obsidian · Notion · Continuum                      │ │
+│  ├─────────────────┬───────────────────────────────────┤ │
 │  │  MCP Client (JSON-RPC 2.0) | Config (YAML)          │ │
 │  │  Auto-Learning | Evolution | Crash Recovery         │ │
 │  │  Self-Adaptive Timeout | Key Rotation               │ │
@@ -532,6 +574,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 ## 🙏 Acknowledgments
 
 - [jcode](https://github.com/1jehuang/jcode) — The next generation coding agent harness (primary inspiration)
+- [Eling (PatrickNoFilter)](https://github.com/PatrickNoFilter/eling) — 8-layer memory architecture, Blackbox flight recorder, HRR reasoning, Facts layer with BM25 hybrid, Obsidian vault access, Notion sync, Continuum multi-agent orchestration, and document-to-Markdown (adapted to Go)
 - [Alibaba Open Code Review](https://github.com/alibaba/open-code-review) — Code review integration
 - [Charmbracelet](https://charm.sh/) — Bubbletea, Bubbles, Lipgloss (beautiful TUI)
 - [DeepSeek](https://deepseek.com/) — LLM API provider

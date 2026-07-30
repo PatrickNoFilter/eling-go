@@ -230,7 +230,14 @@ func (s *Server) start(ctx context.Context) error {
 
 // stop terminates the MCP server.
 func (s *Server) stop() {
-	close(s.done)
+	s.mu.Lock()
+	select {
+	case <-s.done:
+		// Already closed — safe to proceed
+	default:
+		close(s.done)
+	}
+	s.mu.Unlock()
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
 		_ = s.cmd.Wait()

@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"eling/internal/config"
+	"eling/internal/layers"
 	"eling/internal/mcp"
 	"eling/internal/provider"
 	"eling/internal/session"
@@ -83,6 +84,9 @@ type Agent struct {
 
 	// Memory
 	memory *Memory
+
+	// Brain with 8-layer memory architecture + lifecycle hooks
+	Brain *layers.Brain
 
 	// Tools (like jcode's tool registry)
 	ToolRegistry *tools.Registry
@@ -267,6 +271,40 @@ const maxToolResultBytes = 256 * 1024 // 256 KiB
 // at any point. Older messages are dropped to keep memory bounded.
 const maxMessagesInToolLoop = 100
 
+// SetBrain attaches the 8-layer memory Brain to the Agent and registers
+// the default lifecycle hooks. Must be called before the first Ask/AskStream
+// for hooks to fire. Safe to call once; panics on re-assignment.
+func (a *Agent) SetBrain(brain *layers.Brain) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.Brain != nil {
+		panic("agent: SetBrain called twice")
+	}
+	a.Brain = brain
+	// Register all 15 default lifecycle hooks on this Brain
+	brain.RegisterDefaultHooks()
+	// Fire session-start hook with agent metadata
+	brain.FireHook(layers.HookSessionStart, map[string]interface{}{
+		"agent":       "eling-go",
+		"layers":      len(brain.Layers()),
+		"total_hooks": brain.Hooks.TotalHandlers(),
+	})
+}
+
+// fireHook fires a lifecycle hook on the Brain, if available.
+// Context values are passed as a map; nil is safe.
+func (a *Agent) fireHook(hookName string, ctx map[string]interface{}) {
+	if a.Brain == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[agent] hook %q panicked: %v (caught)", hookName, r)
+		}
+	}()
+	a.Brain.FireHook(hookName, ctx)
+}
+
 // Ask sends a prompt to the LLM, executing any tool calls the model makes
 // along the way, and returns the final text response.
 // If onToolCall is not nil, it is invoked synchronously for each tool invocation.
@@ -318,6 +356,12 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 		}
 	}
 
+	// Fire pre-user-message hook before processing
+	a.fireHook(layers.HookPreUserMessage, map[string]interface{}{
+		"content": prompt,
+		"source":  "user_prompt",
+	})
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			// On retry, estimate a longer timeout: use the time already spent
@@ -364,6 +408,13 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 			if s != nil && len(s.Entries) > 0 {
 				s.Entries[len(s.Entries)-1].Tokens = estimateSessionEntryTokens(s.Entries[len(s.Entries)-1])
 			}
+
+			// Fire post-user-message hook after persisting the user's prompt
+			a.fireHook(layers.HookPostUserMessage, map[string]interface{}{
+				"content": prompt,
+				"source":  "user_prompt",
+			})
+
 			_ = a.Sessions.Append(a.sessionName, "assistant", finalContent)
 			if s != nil && len(s.Entries) > 0 {
 				s.Entries[len(s.Entries)-1].Tokens = totalTokens / 2
@@ -375,6 +426,12 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 				s.Metadata["total_tokens"] = fmt.Sprintf("%d", totalTokens)
 			}
 			a.mu.Unlock()
+
+			// Fire post-assistant-message hook
+			a.fireHook(layers.HookPostAssistantMessage, map[string]interface{}{
+				"content": finalContent,
+				"prompt":  prompt,
+			})
 
 			// Auto-learn background tasks
 			go a.autoLearn(prompt, finalContent)
@@ -406,6 +463,13 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 				"[⚠️ Error: "+err.Error()+"]")
 			a.mu.Unlock()
 
+			// Fire error-occurred hook
+			a.fireHook(layers.HookErrorOccurred, map[string]interface{}{
+				"error":      err.Error(),
+				"context":    prompt,
+				"tool_name":  "ask",
+			})
+
 			return "", err
 		}
 
@@ -419,8 +483,14 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 
 		// If we've exhausted retries, return the timeout error
 		if attempt >= maxRetries {
-			return "", fmt.Errorf("turn timed out after %d seconds (retried %d times): %w",
+			timeoutErr := fmt.Errorf("turn timed out after %d seconds (retried %d times): %w",
 				int(time.Since(startTime).Seconds()), maxRetries, lastErr)
+			a.fireHook(layers.HookErrorOccurred, map[string]interface{}{
+				"error":      timeoutErr.Error(),
+				"context":    prompt,
+				"tool_name":  "ask_timeout",
+			})
+			return "", timeoutErr
 		}
 	}
 
@@ -567,6 +637,12 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 				})
 			}
 
+			// Fire pre-tool-use hook before execution
+			a.fireHook(layers.HookPreToolUse, map[string]interface{}{
+				"tool_name": tc.Function.Name,
+				"arguments": tc.Function.Arguments,
+			})
+
 			result, execErr := a.ToolRegistry.Execute(tc.Function.Name, args)
 			var resultText string
 			if execErr != nil {
@@ -585,6 +661,17 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 				}
 				resultText = string(b[:cut]) + "\n... [truncated: result too large]"
 			}
+
+			// Fire post-tool-use hook after execution
+			hookCtx := map[string]interface{}{
+				"tool_name": tc.Function.Name,
+				"arguments": tc.Function.Arguments,
+				"result":    resultText,
+			}
+			if execErr != nil {
+				hookCtx["error"] = execErr.Error()
+			}
+			a.fireHook(layers.HookPostToolUse, hookCtx)
 
 			errStr := ""
 			if execErr != nil {
@@ -1135,6 +1222,12 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 				})
 			}
 
+			// Fire pre-tool-use hook before execution
+			a.fireHook(layers.HookPreToolUse, map[string]interface{}{
+				"tool_name": tc.Function.Name,
+				"arguments": tc.Function.Arguments,
+			})
+
 			result, execErr := a.ToolRegistry.Execute(tc.Function.Name, args)
 			var resultText string
 			if execErr != nil {
@@ -1153,6 +1246,17 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 				}
 				resultText = string(b[:cut]) + "\n... [truncated: result too large]"
 			}
+
+			// Fire post-tool-use hook after execution
+			hookCtx := map[string]interface{}{
+				"tool_name": tc.Function.Name,
+				"arguments": tc.Function.Arguments,
+				"result":    resultText,
+			}
+			if execErr != nil {
+				hookCtx["error"] = execErr.Error()
+			}
+			a.fireHook(layers.HookPostToolUse, hookCtx)
 
 			errStr := ""
 			if execErr != nil {
@@ -1990,13 +2094,19 @@ func (a *Agent) updateConversationSummary() {
 	a.mu.RLock()
 	summary := a.conversationSummary
 	s, ok := a.Sessions.Get(a.sessionName)
+	// ⚠️ Snapshot entries under lock to avoid data race with concurrent
+	// Ask/AskStream which modify session entries while holding a.mu.
+	var entries []session.Entry
+	if ok && s != nil {
+		entries = make([]session.Entry, len(s.Entries))
+		copy(entries, s.Entries)
+	}
 	a.mu.RUnlock()
 
-	if !ok || s == nil || len(s.Entries) < 6 {
+	if len(entries) < 6 {
 		return // not enough conversation to summarize meaningfully
 	}
 
-	entries := s.Entries
 	// Sample from the earlier part (skip last 4 entries = most recent turn)
 	sampleEnd := len(entries) - 4
 	if sampleEnd < 2 {
@@ -2063,11 +2173,14 @@ func (a *Agent) updateConversationSummary() {
 		return
 	}
 
-	// Build the updated summary
+	// Build the updated summary — store WITHOUT the prefix to prevent
+	// prefix duplication on subsequent updates. The prefix is added only
+	// in buildMessages() where the summary is injected into the conversation.
 	var sb strings.Builder
-	sb.WriteString("Conversation covered so far: ")
 	if summary != "" {
-		sb.WriteString(summary)
+		// Strip any existing prefix to be safe (backward compat with old data)
+		cleaned := strings.TrimPrefix(summary, "Conversation covered so far: ")
+		sb.WriteString(cleaned)
 		sb.WriteString("; ")
 	}
 	sb.WriteString(strings.Join(newFacts, "; "))

@@ -483,3 +483,85 @@ Lock Hierarchy (no deadlock risk — consistent ordering):
 3. Memory operations use their own lock, separate from Agent
 4. Tool registry is completely independent of Agent locking
 5. All channel operations are non-blocking (buffered channels)
+
+---
+
+## 🧠 Layer 8: 8-Layer Memory Architecture (`internal/layers/`)
+
+Adapted from [PatrickNoFilter/eling](https://github.com/PatrickNoFilter/eling) (Python) — the complete layered memory system ported to Go.
+
+### Architecture Overview
+
+```
+📡 Layer 8: CONTINUUM   — multi-agent orchestration hub (shared continuum.db)
+🧠 Layer 7: NOTION     — online brain, persistent, human-readable (optional)
+📝 Layer 6: OBSIDIAN   — local Markdown vault, project notes, daily logs
+📚 Layer 5: KB         — FTS5 knowledge corpus for long-form knowledge
+🕸️ Layer 4: CODE       — codegraph symbol intelligence
+💎 Layer 3: FACTS      — SQLite + BM25 hybrid with trust scoring
+🔎 Layer 2: BLACKBOX   — flight recorder + telemetry + 11-metric efficiency scoring
+⚡ Layer 1: BUILTIN    — MEMORY.md / USER.md (always-on, zero setup)
+```
+
+### Layer Interface
+
+```go
+type Layer interface {
+    Name() string
+    Priority() int
+    Query(ctx context.Context, q string, limit int) ([]Result, error)
+    Store(ctx context.Context, item Item) error
+    Close() error
+}
+```
+
+### Brain Orchestrator (RRF Fusion)
+
+```go
+brain := layers.NewBrain(
+    layers.NewBuiltinLayer(stateDir),
+    blackboxLayer,
+    factsLayer,
+    codeLayer,
+    kbLayer,
+    obsidianLayer,
+    notionLayer,
+    continuumLayer,
+)
+
+results, err := brain.Query(ctx, "what did I learn about caching", 10)
+```
+
+Results from all layers are fused using **Reciprocal Rank Fusion (RRF)**:
+```
+RRF score = 1 / (60 + rank) for each result in each layer
+```
+
+### Layer Details
+
+| Layer | File | DB | Key Feature |
+|-------|------|----|-------------|
+| **Builtin** | `builtin.go` | Flat files (MEMORY.md, USER.md) | Always-on identity context |
+| **Blackbox** | `blackbox.go` | `blackbox.db` (SQLite) | 11-metric efficiency scoring |
+| **Facts** | `facts.go` | `facts.db` (SQLite + FTS5) | BM25 + optional embeddings |
+| **Code** | `code.go` | `code.db` (SQLite) | Auto-indexes Go functions/structs |
+| **KB** | `kb.go` | `kb.db` (SQLite + FTS5) | Long-form knowledge storage |
+| **Obsidian** | `obsidian.go` | Filesystem (`.md` files) | Local Markdown vault access |
+| **Notion** | `notion.go` | Notion API (cloud) | Optional online persistence |
+| **Continuum** | `continuum.go` | `continuum.db` (SQLite) | Multi-agent orchestration |
+
+### Blackbox 11 Efficiency Metrics
+
+| Metric | What it measures |
+|--------|-----------------|
+| Redundant reads | Files read twice without changes between |
+| Cache hit ratio | Terminal output reuse vs. re-execution |
+| Read amplification | Lines read per line written |
+| Retry waste | Bash/compile failures retried |
+| Yield density | Edits per tool call |
+| Token efficiency | Total tokens used |
+| Edit efficiency | Edits per file open |
+| Test success | Passes per test run |
+| Commit frequency | Commits per hour |
+| Context window utilization | Proportion of context actually used |
+| Subagent overhead | Orchestration cost of subagents |

@@ -16,8 +16,11 @@ import (
 	"time"
 
 	"eling/internal/agent"
+	"eling/internal/cli"
 	"eling/internal/config"
 	"eling/internal/logger"
+	"eling/internal/markdownify"
+	"eling/internal/skills"
 	"eling/internal/tui"
 
 	"github.com/briandowns/spinner"
@@ -156,12 +159,125 @@ func main() {
 	showSessions := flag.Bool("sessions", false, "List sessions (alias for --list-sessions)")
 	sessionLabel := flag.String("session-name", "", "Name this session (for easy recall later)")
 	nonInteractive := flag.Bool("run", false, "Run a single command non-interactively")
+	mcpMode := flag.Bool("mcp", false, "Run as MCP server (exposes brain layers as MCP tools)")
+	mcpVerify := flag.Bool("mcp-verify", false, "Verify MCP server is running (check tools)")
+	agentID := flag.String("agent-id", "eling-mcp", "Agent identifier for continuum (used with --mcp)")
+	vaultPath := flag.String("vault", "", "Path to Obsidian vault (used with --mcp)")
+	markdownifyMode := flag.Bool("markdownify", false, "Start markdownify HTTP server for document-to-Markdown conversion")
+	markdownifyAddr := flag.String("markdownify-addr", ":8080", "Address for markdownify HTTP server")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println("eling version", Version)
 		os.Exit(0)
+	}
+
+	// ── CLI Subcommand Mode ─────────────────────────────────────────────────
+	// If the first argument is a CLI subcommand, handle it directly
+	// without requiring an API key or full agent initialization.
+	if flag.NArg() > 0 {
+		cliCmd := flag.Arg(0)
+		// Check if this looks like a CLI subcommand (not a prompt)
+		cliSubcommands := map[string]bool{
+			"remember": true, "recall": true, "probe": true, "reason": true,
+			"reflect": true, "snapshot": true, "list-snapshots": true,
+			"rollback": true, "link-stats": true, "linked-facts": true,
+			"evolve": true, "stats": true, "config": true, "init-rules": true,
+			"mcp": true, "continuum": true, "blackbox": true, "markdownify": true,
+			"sync": true, "install-opencode": true, "install-zero": true,
+			"install-termux": true, "help": true,
+			"export": true, "think": true, "verify": true,
+			"search-temporal": true, "version-history": true,
+			"versioned-update": true, "undo-version": true,
+		}
+		if cliSubcommands[cliCmd] {
+			// Handle CLI commands with minimal setup
+			cfgPath := *configPath
+			if cfgPath == "" {
+				cfgPath = config.FindConfigPath()
+			}
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				// Create a default config if none exists
+				cfg = config.DefaultConfig()
+			}
+			if cli.RunCLI(cfg, flag.Args()) {
+				os.Exit(0)
+			}
+			// If RunCLI returns false, fall through to normal agent mode
+		}
+	}
+
+	// ── MCP Server Mode (delegated to mcp-server skill) ────────────────────
+	if *mcpMode || *mcpVerify {
+		logger.Global().Info("Starting MCP server mode (agent-id: %s)", *agentID)
+
+		// Determine state directory
+		stateDir := os.Getenv("ELING_HOME")
+		if stateDir == "" {
+			home, _ := os.UserHomeDir()
+			stateDir = filepath.Join(home, ".eling")
+		}
+		os.MkdirAll(stateDir, 0755)
+
+		// Register the MCP server as a skill first
+		skillCfg := skills.DefaultMCPSkillConfig()
+		skillCfg.Name = "eling-brains"
+		skillCfg.Version = Version
+		skillCfg.StateDir = stateDir
+		skillCfg.VaultPath = *vaultPath
+		skillCfg.AgentID = *agentID
+
+		skills.RegisterMCPSkill(skillCfg)
+
+		if *mcpVerify {
+			// Verification mode: start, check status, then stop
+			if err := skills.MCPSkillStart(); err != nil {
+				log.Fatalf("Failed to start MCP server: %v", err)
+			}
+			fmt.Fprintf(os.Stderr, "🧠 ELING MCP Server v%s\n", Version)
+			fmt.Fprintf(os.Stderr, "   Agent ID: %s\n", *agentID)
+			fmt.Fprintf(os.Stderr, "   State:    %s\n", stateDir)
+			fmt.Fprintf(os.Stderr, "   Verifying...\n\n")
+			status, _ := skills.MCPSkillStatus()
+			fmt.Fprintf(os.Stderr, "   ✅ MCP server is ready\n")
+			fmt.Fprintf(os.Stderr, "   %s\n", status)
+			skills.MCPSkillStop()
+			logger.WriteCleanShutdownMarker()
+			return
+		}
+
+		// Start the MCP server via the skill
+		if err := skills.MCPSkillStart(); err != nil {
+			log.Fatalf("MCP server start error: %v", err)
+		}
+		logger.Global().Info("MCP server skill started successfully")
+
+		// Block until interrupted (the skill runs in background goroutine)
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		logger.Global().Info("Shutting down MCP server...")
+		skills.MCPSkillStop()
+		logger.WriteCleanShutdownMarker()
+		return
+	}
+
+	// ── Markdownify Server Mode ──────────────────────────────────────────
+	if *markdownifyMode {
+		logger.Global().Info("Starting markdownify HTTP server on %s", *markdownifyAddr)
+		conv := markdownify.NewConverter()
+		fmt.Fprintf(os.Stderr, "📝 ELING Markdownify Server\n")
+		fmt.Fprintf(os.Stderr, "   Listening on %s\n", *markdownifyAddr)
+		fmt.Fprintf(os.Stderr, "   GET  /convert?url=<url>  — Convert URL to Markdown\n")
+		fmt.Fprintf(os.Stderr, "   POST /convert (file=...) — Upload file to convert\n\n")
+		if err := conv.ServeHTTP(*markdownifyAddr); err != nil {
+			logger.Global().Error("Markdownify server error: %v", err)
+			log.Fatalf("Markdownify server error: %v", err)
+		}
+		logger.WriteCleanShutdownMarker()
+		return
 	}
 
 	// Initialize crash-safe logger
@@ -240,6 +356,18 @@ func main() {
 	ag, err := agent.New(cfg)
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	// Initialize the 8-layer memory Brain and attach it to the agent.
+	// This enables all 15 lifecycle hooks during conversation.
+	{
+		brain, brainErr := cli.OpenBrain(cfg)
+		if brainErr != nil {
+			log.Printf("Warning: could not initialize memory layers: %v", brainErr)
+		} else {
+			ag.SetBrain(brain)
+			log.Printf("🧠 8-layer Brain initialized with %d hooks", brain.Hooks.TotalHandlers())
+		}
 	}
 
 	if err := ag.LoadState(); err != nil {
