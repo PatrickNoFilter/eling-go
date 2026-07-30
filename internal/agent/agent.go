@@ -91,9 +91,6 @@ type Agent struct {
 	// Tools (like jcode's tool registry)
 	ToolRegistry *tools.Registry
 
-	// Skills/Plugins (dynamic plugin/skill manager)
-	SkillManager *skills.Manager
-
 	// MCP (like jcode's MCP system)
 	MCP *mcp.Manager
 
@@ -200,14 +197,12 @@ func New(cfg *config.Config) (*Agent, error) {
 
 	sesMgr := session.NewManager(cfg.Session.SaveDir)
 	mcpMgr := mcp.NewManager()
-	skMgr := skills.NewManager()
 
 	a := &Agent{
 		cfg:             cfg,
 		providers:       pm,
 		memory:          mem,
 		ToolRegistry:    tools.DefaultRegistry,
-		SkillManager:    skMgr,
 		MCP:             mcpMgr,
 		Sessions:        sesMgr,
 		skills:          make([]LearnedSkill, 0),
@@ -219,26 +214,6 @@ func New(cfg *config.Config) (*Agent, error) {
 
 	// Create a default session
 	sesMgr.Create(a.sessionName, cfg.Agent.DefaultModel)
-
-	// Bridge skills into the tool registry so the LLM can call them.
-	// Skip web_search since tools/web.go already provides a working version.
-	for _, sk := range skMgr.List() {
-		if sk.Name == "web_search" {
-			continue // tools/web.go has the real web_search
-		}
-		if _, exists := a.ToolRegistry.Get(sk.Name); !exists {
-			skCopy := sk // capture for closure
-			a.ToolRegistry.Register(tools.Tool{
-				Name:        skCopy.Name,
-				Description: skCopy.Description,
-				Version:     skCopy.Version,
-				Category:    "skill",
-				Execute: func(args map[string]interface{}) (interface{}, error) {
-					return skCopy.Execute(args)
-				},
-			})
-		}
-	}
 
 	// Connect MCP servers from config
 	if cfg.MCP.Enabled {
@@ -1477,9 +1452,9 @@ func (a *Agent) ListProviders() []string {
 	return a.providers.List()
 }
 
-// ListSkills returns all registered skills.
-func (a *Agent) ListSkills() []skills.Skill {
-	return a.SkillManager.List()
+// ListSkills returns all registered skills (skills are tools with category "skill").
+func (a *Agent) ListSkills() []tools.Tool {
+	return a.ToolRegistry.ListByCategory("skill")
 }
 
 // ListDynamicTools returns all dynamic (persisted) tool registrations.
@@ -1536,16 +1511,6 @@ func (a *Agent) AddPluginFromCommand(name, description, command string) error {
 		},
 	}
 	a.ToolRegistry.Register(tool)
-
-	// Also register as a skill
-	_ = a.SkillManager.Register(skills.Skill{
-		Name:        name,
-		Description: description,
-		Version:     "1.0.0",
-		Execute: func(args map[string]interface{}) (interface{}, error) {
-			return tools.RunDynamicCommand(command, args)
-		},
-	})
 	tools.AddDynamicTool(tools.DynamicTool{
 		Name:        name,
 		Description: description,
@@ -1557,22 +1522,7 @@ func (a *Agent) AddPluginFromCommand(name, description, command string) error {
 
 // AddSkill registers a new skill. Used by the TUI /add skill command.
 func (a *Agent) AddSkill(name, description string) error {
-	// Register as a skill
-	err := a.SkillManager.Register(skills.Skill{
-		Name:        name,
-		Description: description,
-		Version:     "1.0.0",
-		Execute: func(args map[string]interface{}) (interface{}, error) {
-			return tools.OK(map[string]interface{}{
-				"skill":   name,
-				"message": fmt.Sprintf("Skill %q executed", name),
-			}), nil
-		},
-	})
-	if err != nil {
-		return err
-	}
-	// Also register in tool registry so the LLM can call it
+	// Register in tool registry so the LLM can call it
 	cat := "skill"
 	if _, exists := a.ToolRegistry.Get(name); !exists {
 		a.ToolRegistry.Register(tools.Tool{
@@ -1781,21 +1731,6 @@ func (a *Agent) restoreDynamicTool(dt tools.DynamicTool) {
 		},
 	}
 	a.ToolRegistry.Register(tool)
-
-	// Also restore in SkillManager for skills and plugins
-	if cat == "skill" || cat == "plugin" {
-		_ = a.SkillManager.Register(skills.Skill{
-			Name:        dt.Name,
-			Description: dt.Description,
-			Version:     "1.0.0",
-			Execute: func(args map[string]interface{}) (interface{}, error) {
-				if cmd != "" {
-					return tools.RunDynamicCommand(cmd, args)
-				}
-				return tools.OK(map[string]interface{}{"note": "no command defined"}), nil
-			},
-		})
-	}
 }
 
 // safeMarshalCompactJSON marshals v to compact JSON (no indentation),

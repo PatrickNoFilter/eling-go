@@ -69,20 +69,12 @@ func init() {
 	DefaultRegistry.Register(Tool{
 		Name: "register_tool",
 		Description: "Dynamically register a new tool so the agent can call it. " +
-			"The tool wraps a bash command. Provide name, description, and either command or inline script.",
+			"The tool wraps a bash command. Provide name, description, and either command or inline script. " +
+			"Use type='skill' to register as a skill (appears in skill list). " +
+			"Use type='tool' (default) to register as a dynamic tool.",
 		Version:  "1.0.0",
 		Category: "system",
 		Execute:  registerToolExecute,
-	})
-
-	// register_skill – lets the LLM dynamically register a named skill/plugin
-	DefaultRegistry.Register(Tool{
-		Name: "register_skill",
-		Description: "Dynamically register a new skill/plugin. Skills appear in the agent's skill list and are persisted. " +
-			"Provide name, description, and optionally a command to execute.",
-		Version:  "1.0.0",
-		Category: "system",
-		Execute:  registerSkillExecute,
 	})
 }
 
@@ -129,6 +121,10 @@ func registerToolExecute(args map[string]interface{}) (interface{}, error) {
 	cat := "dynamic"
 	if c, _ := args["category"].(string); c != "" {
 		cat = c
+	}
+	// Support type="skill" to register as a skill
+	if t, _ := args["type"].(string); t == "skill" {
+		cat = "skill"
 	}
 
 	tool := Tool{

@@ -20,7 +20,7 @@ import (
 	"eling/internal/config"
 	"eling/internal/logger"
 	"eling/internal/markdownify"
-	"eling/internal/skills"
+	"eling/internal/mcp/skill"
 	"eling/internal/tui"
 
 	"github.com/briandowns/spinner"
@@ -222,34 +222,34 @@ func main() {
 		os.MkdirAll(stateDir, 0755)
 
 		// Register the MCP server as a skill first
-		skillCfg := skills.DefaultMCPSkillConfig()
+		skillCfg := mcpskill.DefaultMCPSkillConfig()
 		skillCfg.Name = "eling-brains"
 		skillCfg.Version = Version
 		skillCfg.StateDir = stateDir
 		skillCfg.VaultPath = *vaultPath
 		skillCfg.AgentID = *agentID
 
-		skills.RegisterMCPSkill(skillCfg)
+		mcpskill.RegisterMCPSkill(skillCfg)
 
 		if *mcpVerify {
 			// Verification mode: start, check status, then stop
-			if err := skills.MCPSkillStart(); err != nil {
+			if err := mcpskill.MCPSkillStart(); err != nil {
 				log.Fatalf("Failed to start MCP server: %v", err)
 			}
 			fmt.Fprintf(os.Stderr, "🧠 ELING MCP Server v%s\n", Version)
 			fmt.Fprintf(os.Stderr, "   Agent ID: %s\n", *agentID)
 			fmt.Fprintf(os.Stderr, "   State:    %s\n", stateDir)
 			fmt.Fprintf(os.Stderr, "   Verifying...\n\n")
-			status, _ := skills.MCPSkillStatus()
+			status, _ := mcpskill.MCPSkillStatus()
 			fmt.Fprintf(os.Stderr, "   ✅ MCP server is ready\n")
 			fmt.Fprintf(os.Stderr, "   %s\n", status)
-			skills.MCPSkillStop()
+			mcpskill.MCPSkillStop()
 			logger.WriteCleanShutdownMarker()
 			return
 		}
 
 		// Start the MCP server via the skill
-		if err := skills.MCPSkillStart(); err != nil {
+		if err := mcpskill.MCPSkillStart(); err != nil {
 			log.Fatalf("MCP server start error: %v", err)
 		}
 		logger.Global().Info("MCP server skill started successfully")
@@ -259,7 +259,7 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		logger.Global().Info("Shutting down MCP server...")
-		skills.MCPSkillStop()
+		mcpskill.MCPSkillStop()
 		logger.WriteCleanShutdownMarker()
 		return
 	}
