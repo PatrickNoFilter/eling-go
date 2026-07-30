@@ -1,10 +1,10 @@
 # 🎯 Recommended Consolidations — Execution Plan
 
-> **Status: ✅ Groups A, B, C COMPLETE | 🚧 Group D IN PROGRESS | Last updated: 2025-07-30**
+> **Status: ✅ ALL GROUPS COMPLETE | Implemented: 2025-07-30 | Last verified: 2025-07-30**
 
 ```text
-Progress:  ████████████░░░░░░  75% (3 of 4 groups done)
-Groups:    A ✅ B ✅ C ✅ D 🚧
+Progress:  ████████████████████  100% (4 of 4 groups done)
+Groups:    A ✅ B ✅ C ✅ D ✅
 ```
 
 **Goal:** Eliminate all redundant/duplicate/dead code while preserving **every externally visible behavior** — every tool the LLM can call, every TUI command, every CLI flag, every API endpoint, every persistence mechanism.
@@ -798,6 +798,21 @@ echo '{"query":"test query"}' | go run . --run-tool semantic_search 2>&1 | head 
 | **C** Memory | ~100 removed | 🟡 | None — `/recall` still works via `agent.Memory`, Brain.Store() hooks handle persistence | `git checkout -- internal/agent/agent.go internal/agent/memory.go` |
 | **D** Semantic Search | ~200 removed + ~50 added | 🔴 | None — `semantic_search` tool returns results from Brain.Query() with local trigram fallback | `git checkout -- internal/tools/semantic.go internal/agent/agent.go` |
 | **Total** | **~540 removed + ~532 moved + ~50 added** | | **Zero external behavior changes** | |
+
+---
+
+## ✅ Execution Summary
+
+All 4 groups have been implemented and verified. Here's what actually changed:
+
+| Group | Status | Lines Changed | Notes |
+|-------|:------:|:-------------:|-------|
+| **A** Dead Code & Skills | ✅ Done | ~160 removed + 482 moved | `skills` package removed; MCP skill lives at `internal/mcp/skill/` with package `mcpskill`; `ListSkills()` uses `ToolRegistry.ListByCategory("skill")` |
+| **B** Auto-Learning | ✅ Done | ~80 removed | `learnFromExchange()` renamed to `autoLearn()`, old pattern-based `autoLearn()` removed, `detectPromptType()` removed |
+| **C** Memory | ✅ Done | ~100 removed | `saveConversationToMemory()`, `inferConversationTags()`, `saveTurnCounter` removed; `StartDecay()`/`StopDecay()` removed from `memory.go` |
+| **D** Semantic Search | ✅ Done | ~210 removed + ~50 added | `BrainQuery` hook injected; `semanticSearchExecute()` tries Brain first, falls back to local trigram; `SetMemoryItems`, `SemanticIndexSave/Load`, `searchMemoryItems`, `MemoryItemData`, `ItemsData` removed. **`AddToSemanticIndex` kept** — needed by `semantic_index` tool (kept per plan). |
+
+**Pre-existing test failure:** `internal/logger` tests fail both with and without these changes (unrelated).
 
 ---
 

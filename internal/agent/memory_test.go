@@ -169,48 +169,55 @@ func TestMemoryJSONSerialization(t *testing.T) {
 	}
 }
 
-func TestMemoryDecay(t *testing.T) {
+func TestMemoryForgetWeakest(t *testing.T) {
 	mem := NewMemory()
-	mem.Remember("strong memory", "test", nil)
-	mem.Remember("weak memory", "test", nil)
+	mem.MaxShort = 5
+	mem.MaxLong = 10
 
-	// Items are stored in ShortTerm first. Weaken one of them.
-	// Both should be in ShortTerm since we have < MaxShort items.
-	mem.ShortTerm[1].Strength = 0.05
-
-	// Apply decay once (rate=0.0 to not change strengths, but the weak one should be removed)
-	mem.decayOnce(0.0)
-
-	// The weak item (strength < 0.1) should be removed
-	if mem.Len() != 1 {
-		t.Errorf("expected 1 item after decay removal, got %d: short=%+v items=%+v", mem.Len(), mem.ShortTerm, mem.Items)
+	// Fill items so some go to long-term and trigger forgetting
+	for i := 0; i < 20; i++ {
+		mem.Remember("item", "test", nil)
 	}
 
-	// Verify only the strong one remains
-	results := mem.Recall("strong")
-	if len(results) != 1 {
-		t.Errorf("expected 1 recall result, got %d", len(results))
+	// We should have some items in short-term and long-term
+	stats := mem.Stats()
+	t.Logf("Memory stats: short=%d, long=%d, total=%d", stats["short_term"], stats["long_term"], stats["total"])
+
+	// Long-term should be at most MaxLong (forgetWeakest should have kept it under)
+	if stats["long_term"] > 10 {
+		t.Errorf("expected long_term <= 10 after forgetWeakest, got %d", stats["long_term"])
+	}
+
+	// Total should be non-zero
+	if stats["total"] == 0 {
+		t.Error("memory should not be empty after forgetting")
 	}
 }
 
-func TestMemoryDecayReducesStrength(t *testing.T) {
+func TestMemoryStrengthBoostOnRecall(t *testing.T) {
 	mem := NewMemory()
-	mem.Remember("test", "test", nil)
+	mem.Remember("test item", "test", nil)
 
-	// Apply decay once with rate 0.1 - item is in ShortTerm
-	mem.decayOnce(0.1)
-
-	if mem.ShortTerm[0].Strength != 0.9 {
-		t.Errorf("expected strength 0.9 after decay, got %f", mem.ShortTerm[0].Strength)
+	// Item should start with strength 1.0
+	mem.mu.RLock()
+	if mem.ShortTerm[0].Strength != 1.0 {
+		t.Errorf("expected initial strength 1.0, got %f", mem.ShortTerm[0].Strength)
 	}
+	mem.mu.RUnlock()
 
-	// Apply 9 more times to reach 0.0
-	for i := 0; i < 9; i++ {
-		mem.decayOnce(0.1)
-	}
+	// Recall should boost strength
+	mem.Recall("test item")
 
-	// Item should now be forgotten (strength 0.0 < 0.1)
-	if mem.Len() != 0 {
-		t.Errorf("expected 0 items after full decay, got %d", mem.Len())
+	mem.mu.RLock()
+	if mem.ShortTerm[0].Strength < 1.0 {
+		t.Errorf("expected strength >= 1.0 after recall, got %f", mem.ShortTerm[0].Strength)
 	}
+	mem.mu.RUnlock()
+
+	// Access count should increment
+	mem.mu.RLock()
+	if mem.ShortTerm[0].Accessed != 1 {
+		t.Errorf("expected Accessed=1 after recall, got %d", mem.ShortTerm[0].Accessed)
+	}
+	mem.mu.RUnlock()
 }

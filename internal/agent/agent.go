@@ -181,9 +181,6 @@ func New(cfg *config.Config) (*Agent, error) {
 	mem.MaxShort = cfg.Memory.MaxShortTerm
 	mem.MaxLong = cfg.Memory.MaxLongTerm
 
-	// Push initial memory items to semantic search so it doesn't read disk
-	tools.SetMemoryItems(mem.ItemsData())
-
 	sesMgr := session.NewManager(cfg.Session.SaveDir)
 	mcpMgr := mcp.NewManager()
 
@@ -245,6 +242,27 @@ func (a *Agent) SetBrain(brain *layers.Brain) {
 		panic("agent: SetBrain called twice")
 	}
 	a.Brain = brain
+
+	// Wire up semantic_search tool to use Brain.Query for more accurate results
+	tools.BrainQuery = func(query string, limit int) ([]tools.SearchResult, error) {
+		ctx := context.Background()
+		results, err := brain.Query(ctx, query, limit)
+		if err != nil {
+			return nil, err
+		}
+		converted := make([]tools.SearchResult, 0, len(results))
+		for _, r := range results {
+			converted = append(converted, tools.SearchResult{
+				Content:  r.Content,
+				Score:    r.Score,
+				Category: r.Category,
+				Tags:     r.Tags,
+				Source:   r.Source,
+			})
+		}
+		return converted, nil
+	}
+
 	// Register all 15 default lifecycle hooks on this Brain
 	brain.RegisterDefaultHooks()
 	// Fire session-start hook with agent metadata
@@ -1636,9 +1654,6 @@ func (a *Agent) LoadState() error {
 		}
 	}
 
-	// Push memory items to semantic search so it can search without disk IO
-	tools.SetMemoryItems(a.memory.ItemsData())
-
 	// Load skills
 	skillData, err := os.ReadFile(filepath.Join(a.stateDir, "skills.json"))
 	if err == nil {
@@ -1662,9 +1677,6 @@ func (a *Agent) LoadState() error {
 	if err == nil {
 		a.conversationSummary = strings.TrimSpace(string(summaryData))
 	}
-
-	// Load semantic search index
-	_ = tools.SemanticIndexLoad(filepath.Join(a.stateDir, "semantic_index.json"))
 
 	// Load dynamic tools and re-register them
 	toolData, err := os.ReadFile(filepath.Join(a.stateDir, "tools.json"))
@@ -1803,9 +1815,6 @@ func (a *Agent) SaveState() error {
 	if a.conversationSummary != "" {
 		_ = os.WriteFile(filepath.Join(a.stateDir, "summary.txt"), []byte(a.conversationSummary), 0644)
 	}
-
-	// Save semantic search index
-	_ = tools.SemanticIndexSave(filepath.Join(a.stateDir, "semantic_index.json"))
 
 	// Save turn timeout history (for self-adaptive timeout prediction)
 	a.turnTimeoutMu.Lock()

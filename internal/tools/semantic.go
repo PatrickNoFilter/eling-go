@@ -11,7 +11,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +19,23 @@ import (
 // ---------------------------------------------------------------------------
 // Embedding types
 // ---------------------------------------------------------------------------
+
+// BrainSearchFn is an adapter that wraps Brain.Query() for use by semantic_search.
+// Set by agent.go at startup. Returns results sorted by relevance.
+type BrainSearchFn func(query string, limit int) ([]SearchResult, error)
+
+// SearchResult is a unified result from any backend (Brain or local trigram).
+type SearchResult struct {
+	Content  string   `json:"content"`
+	Score    float64  `json:"score"`
+	Category string   `json:"category,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+	Source   string   `json:"source,omitempty"`
+}
+
+// BrainQuery is the package-level hook injected by agent.go.
+// When nil, semantic_search falls back to local trigram search.
+var BrainQuery BrainSearchFn
 
 // EmbeddingVector is a list of floats representing a semantic embedding.
 type EmbeddingVector []float64
@@ -288,41 +304,14 @@ type SemanticIndexItem struct {
 	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
-// MemoryItemData is a simplified memory item for semantic search.
-// The agent pushes its in-memory items here so semantic_search can use them
-// without re-reading the disk on every call.
-type MemoryItemData struct {
-	Content  string   `json:"content"`
-	Category string   `json:"category"`
-	Tags     []string `json:"tags"`
-}
-
-var (
-	cachedMemoryItems   []MemoryItemData
-	cachedMemoryItemsMu sync.RWMutex
-)
-
-// SetMemoryItems sets the in-memory memory items for semantic search.
-// Called by the agent after loading state or when memory changes.
-func SetMemoryItems(items []MemoryItemData) {
-	cachedMemoryItemsMu.Lock()
-	defer cachedMemoryItemsMu.Unlock()
-	if items == nil {
-		cachedMemoryItems = nil
-		return
-	}
-	cachedMemoryItems = make([]MemoryItemData, len(items))
-	copy(cachedMemoryItems, items)
-}
-
 // maxSemanticIndexItems caps the total number of items in the semantic index
 // to prevent unbounded memory growth. When the limit is reached, the oldest
 // items are evicted (FIFO).
 const maxSemanticIndexItems = 10000
 
 var (
-	semanticIndex   []SemanticIndexItem
-	semanticIndexMu sync.RWMutex
+	semanticIndex      []SemanticIndexItem
+	semanticIndexMu    sync.RWMutex
 )
 
 // AddToSemanticIndex adds one or more items to the global semantic index.
@@ -363,54 +352,6 @@ func SemanticSearch(queryText string, topK int) []SemanticResult {
 		return nil
 	}
 	return results
-}
-
-// SemanticIndexSave persists the semantic index to a JSON file.
-// Embeddings are included so the index is immediately usable after load.
-func SemanticIndexSave(path string) error {
-	semanticIndexMu.RLock()
-	defer semanticIndexMu.RUnlock()
-
-	var (
-		data []byte
-		err  error
-	)
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				err = fmt.Errorf("panic during semantic index marshal: %v", r)
-			}
-		}()
-		data, err = json.MarshalIndent(semanticIndex, "", "  ")
-	}()
-	if err != nil {
-		return fmt.Errorf("marshal semantic index: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("create semantic index dir: %w", err)
-	}
-	return os.WriteFile(path, data, 0644)
-}
-
-// SemanticIndexLoad loads the semantic index from a JSON file.
-func SemanticIndexLoad(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // not an error if file doesn't exist
-		}
-		return fmt.Errorf("read semantic index: %w", err)
-	}
-
-	var items []SemanticIndexItem
-	if err := json.Unmarshal(data, &items); err != nil {
-		return fmt.Errorf("unmarshal semantic index: %w", err)
-	}
-
-	semanticIndexMu.Lock()
-	semanticIndex = items
-	semanticIndexMu.Unlock()
-	return nil
 }
 
 // SetEmbeddingEnv sets the environment variables the embedding client uses.
@@ -556,6 +497,20 @@ func semanticSearchExecute(args map[string]interface{}) (interface{}, error) {
 		topK = int(n)
 	}
 
+	// Try Brain query first (more accurate, FTS5+HRR hybrid scoring)
+	// BrainQuery is injected by agent.go at startup.
+	if BrainQuery != nil {
+		results, err := BrainQuery(query, topK)
+		if err == nil && len(results) > 0 {
+			return OK(map[string]interface{}{
+				"query":   query,
+				"results": results,
+				"total":   len(results),
+			}), nil
+		}
+		// Fall through to local search if Brain returns nothing or errors
+	}
+
 	// Get embedding for the query
 	queryEmbed, err := getEmbedding(query)
 	if err != nil {
@@ -571,11 +526,6 @@ func semanticSearchExecute(args map[string]interface{}) (interface{}, error) {
 		_ = err
 	}
 	allResults = append(allResults, indexResults...)
-
-	// Also search the agent's memory (items stored via /memorize or auto-learn)
-	// We attempt to read ~/.eling/memory.json directly and embed each item.
-	memResults := searchMemoryItems(queryEmbed, topK)
-	allResults = append(allResults, memResults...)
 
 	// Deduplicate by content
 	seen := make(map[string]bool)
@@ -612,69 +562,6 @@ func semanticSearchExecute(args map[string]interface{}) (interface{}, error) {
 		"results": deduped,
 		"total":   len(deduped),
 	}), nil
-}
-
-// searchMemoryItems performs semantic search over the cached memory items.
-// Uses the agent's in-memory items (set via SetMemoryItems) instead of
-// reading from disk on every call.
-func searchMemoryItems(queryEmbed EmbeddingVector, topK int) []SemanticResult {
-	cachedMemoryItemsMu.RLock()
-	items := make([]MemoryItemData, len(cachedMemoryItems))
-	copy(items, cachedMemoryItems)
-	cachedMemoryItemsMu.RUnlock()
-
-	if len(items) == 0 {
-		return nil
-	}
-
-	type scored struct {
-		content  string
-		score    float64
-		category string
-		tags     []string
-	}
-	var candidates []scored
-
-	for _, item := range items {
-		if item.Content == "" {
-			continue
-		}
-		vec, err := getEmbedding(item.Content)
-		if err != nil {
-			continue
-		}
-		score := cosineSimilarity(queryEmbed, vec)
-		if score > 0.1 {
-			candidates = append(candidates, scored{
-				content:  item.Content,
-				score:    score,
-				category: item.Category,
-				tags:     item.Tags,
-			})
-		}
-	}
-
-	// Sort by score descending
-	for i := 1; i < len(candidates); i++ {
-		for j := i; j > 0 && candidates[j].score > candidates[j-1].score; j-- {
-			candidates[j], candidates[j-1] = candidates[j-1], candidates[j]
-		}
-	}
-
-	if topK > len(candidates) {
-		topK = len(candidates)
-	}
-
-	results := make([]SemanticResult, 0, topK)
-	for i := 0; i < topK; i++ {
-		results = append(results, SemanticResult{
-			Content:  truncateStr(candidates[i].content, 500),
-			Score:    candidates[i].score,
-			Category: candidates[i].category,
-			Tags:     candidates[i].tags,
-		})
-	}
-	return results
 }
 
 // semanticIndexExecute handles the semantic_index tool call.

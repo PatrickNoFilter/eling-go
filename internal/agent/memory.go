@@ -7,8 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"eling/internal/tools"
 )
 
 // MemoryItem represents a single unit of stored memory.
@@ -193,29 +191,6 @@ func (m *Memory) forgetWeakest() {
 		}
 	}
 	m.Items = kept
-}
-
-// ItemsData returns all memory items (long-term + short-term) as
-// a flat slice for semantic search indexing.
-func (m *Memory) ItemsData() []tools.MemoryItemData {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]tools.MemoryItemData, 0, len(m.Items)+len(m.ShortTerm))
-	for _, item := range m.Items {
-		out = append(out, tools.MemoryItemData{
-			Content:  item.Content,
-			Category: item.Category,
-			Tags:     item.Tags,
-		})
-	}
-	for _, item := range m.ShortTerm {
-		out = append(out, tools.MemoryItemData{
-			Content:  item.Content,
-			Category: item.Category,
-			Tags:     item.Tags,
-		})
-	}
-	return out
 }
 
 func contains(s, substr string) bool {
