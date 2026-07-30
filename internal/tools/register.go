@@ -95,8 +95,22 @@ func registerToolExecute(args map[string]interface{}) (interface{}, error) {
 	if desc == "" {
 		desc = fmt.Sprintf("Dynamic tool: %s", name)
 	}
+
+	// Determine category upfront (needed for validation below)
+	cat := "dynamic"
+	if c, _ := args["category"].(string); c != "" {
+		cat = c
+	}
+	// Support type="skill" to register as a skill
+	if t, _ := args["type"].(string); t == "skill" {
+		cat = "skill"
+	}
+
 	if command == "" && script == "" {
-		return Err("either command or script is required"), nil
+		// Skills don't require a command — they're just category markers
+		if cat != "skill" {
+			return Err("either command or script is required"), nil
+		}
 	}
 
 	execCmd := command
@@ -110,21 +124,17 @@ func registerToolExecute(args map[string]interface{}) (interface{}, error) {
 		isScript = true
 	}
 	if execCmd == "" {
-		return Err("resolved command is empty"), nil
+		// For skills without a command, use a no-op placeholder
+		if cat == "skill" {
+			execCmd = "echo 'skill registered'"
+		} else {
+			return Err("resolved command is empty"), nil
+		}
 	}
 
 	// Check if name already taken in the default registry.
 	if _, exists := DefaultRegistry.Get(name); exists {
 		return Err(fmt.Sprintf("tool %q already exists; unregister it first or use a different name", name)), nil
-	}
-
-	cat := "dynamic"
-	if c, _ := args["category"].(string); c != "" {
-		cat = c
-	}
-	// Support type="skill" to register as a skill
-	if t, _ := args["type"].(string); t == "skill" {
-		cat = "skill"
 	}
 
 	tool := Tool{
@@ -162,60 +172,6 @@ func registerToolExecute(args map[string]interface{}) (interface{}, error) {
 		"registered": name,
 		"category":   cat,
 		"type":       "tool",
-	}), nil
-}
-
-// registerSkillExecute handles the register_skill tool call from the LLM.
-func registerSkillExecute(args map[string]interface{}) (interface{}, error) {
-	name, _ := args["name"].(string)
-	desc, _ := args["description"].(string)
-
-	if name == "" {
-		return Err("name is required"), nil
-	}
-	if desc == "" {
-		desc = fmt.Sprintf("Dynamic skill: %s", name)
-	}
-
-	// We store skills as dynamic tools with category "skill".
-	cat := "skill"
-
-	// Check duplicate
-	if _, exists := DefaultRegistry.Get(name); exists {
-		return Err(fmt.Sprintf("skill/tool %q already exists", name)), nil
-	}
-
-	command, _ := args["command"].(string)
-
-	tool := Tool{
-		Name:        name,
-		Description: desc,
-		Version:     "1.0.0",
-		Category:    cat,
-		Execute: func(a map[string]interface{}) (interface{}, error) {
-			if command != "" {
-				return RunDynamicCommand(command, a)
-			}
-			return OK(map[string]interface{}{
-				"skill":   name,
-				"message": fmt.Sprintf("Skill %q executed (no command defined)", name),
-			}), nil
-		},
-	}
-
-	DefaultRegistry.Register(tool)
-
-	AddDynamicTool(DynamicTool{
-		Name:        name,
-		Description: desc,
-		Category:    cat,
-		Command:     command,
-	})
-
-	return OK(map[string]interface{}{
-		"registered": name,
-		"category":   cat,
-		"type":       "skill",
 	}), nil
 }
 

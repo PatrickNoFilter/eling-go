@@ -97,15 +97,6 @@ var paramSchemas = map[string]map[string]interface{}{
 		},
 		"required": []string{"name", "description"},
 	},
-	"register_skill": {
-		"type": "object",
-		"properties": map[string]interface{}{
-			"name":        map[string]interface{}{"type": "string", "description": "Skill name."},
-			"description": map[string]interface{}{"type": "string", "description": "Description of the skill."},
-			"command":     map[string]interface{}{"type": "string", "description": "Optional bash command the skill executes."},
-		},
-		"required": []string{"name", "description"},
-	},
 	"create_backup": {
 		"type": "object",
 		"properties": map[string]interface{}{

@@ -25,7 +25,6 @@ import (
 	"eling/internal/mcp"
 	"eling/internal/provider"
 	"eling/internal/session"
-	"eling/internal/skills"
 	"eling/internal/tools"
 )
 
@@ -33,7 +32,6 @@ import (
 type LearnedSkill struct {
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
-	Pattern     string    `json:"pattern"`
 	Confidence  float64   `json:"confidence"`
 	LearnedAt   time.Time `json:"learned_at"`
 	UsedCount   int       `json:"used_count"`
@@ -112,10 +110,6 @@ type Agent struct {
 	turnTimeoutMu   sync.RWMutex
 	turnTimeoutHist []TurnTimeoutRecord
 
-	// saveTurnCounter is an atomic counter for rate-limiting conversation
-	// memory saves to every 3rd turn (see saveConversationToMemory).
-	saveTurnCounter atomic.Int64
-
 	// lastToolMetrics tracks the most recent tool loop execution for accurate
 	// turn duration recording. Populated by runToolLoop / runStreamToolLoop
 	// on success, read by Ask() after the tool loop completes.
@@ -189,11 +183,6 @@ func New(cfg *config.Config) (*Agent, error) {
 
 	// Push initial memory items to semantic search so it doesn't read disk
 	tools.SetMemoryItems(mem.ItemsData())
-
-	// Start memory strength decay goroutine if a decay rate is configured
-	if cfg.Memory.DecayRate > 0 {
-		mem.StartDecay(10*time.Minute, cfg.Memory.DecayRate)
-	}
 
 	sesMgr := session.NewManager(cfg.Session.SaveDir)
 	mcpMgr := mcp.NewManager()
@@ -410,8 +399,6 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 
 			// Auto-learn background tasks
 			go a.autoLearn(prompt, finalContent)
-			go a.learnFromExchange(prompt, finalContent)
-			go a.saveConversationToMemory(prompt, finalContent)
 			go a.updateConversationSummary()
 
 			return finalContent, nil
@@ -1025,8 +1012,6 @@ func (a *Agent) AskStream(ctx context.Context, prompt string, onChunk func(strin
 			a.mu.Unlock()
 
 			go a.autoLearn(prompt, fullResponse)
-			go a.learnFromExchange(prompt, fullResponse)
-			go a.saveConversationToMemory(prompt, fullResponse)
 			go a.updateConversationSummary()
 
 			return fullResponse, nil
@@ -1611,11 +1596,6 @@ func (a *Agent) LoadState() error {
 		return err
 	}
 
-	// Stop any existing decay goroutine on the current memory before replacing it.
-	if a.memory != nil {
-		a.memory.StopDecay()
-	}
-
 	// Load memory — handle both old format (PascalCase Go field names) and
 	// current format (lowercase json tags). Go's json decoder does NOT fall
 	// back to struct field names when a json tag is present, so we check for
@@ -1643,8 +1623,6 @@ func (a *Agent) LoadState() error {
 					log.Printf("Warning: failed to decode memory in old format: %v", err2)
 				}
 			}
-			// Ensure decay channel is initialized (not persisted)
-			mem.decayStop = make(chan struct{})
 			// Only replace memory if we got actual items (either new or old format).
 			// Zero capacities are valid when the user intentionally configures them,
 			// but the presence of items proves the decode succeeded.
@@ -1660,11 +1638,6 @@ func (a *Agent) LoadState() error {
 
 	// Push memory items to semantic search so it can search without disk IO
 	tools.SetMemoryItems(a.memory.ItemsData())
-
-	// Restart memory decay on the loaded memory
-	if a.cfg.Memory.DecayRate > 0 {
-		a.memory.StartDecay(10*time.Minute, a.cfg.Memory.DecayRate)
-	}
 
 	// Load skills
 	skillData, err := os.ReadFile(filepath.Join(a.stateDir, "skills.json"))
@@ -2199,74 +2172,11 @@ func (a *Agent) generateLLMSummary(entries []session.Entry, sampleEnd int) {
 	log.Printf("generateLLMSummary: generated new summary (%d chars)", len(newSummary))
 }
 
-// autoLearn extracts patterns and insights from interactions.
-func (a *Agent) autoLearn(prompt, response string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 
-	// Filter: skip trivial interactions to avoid memory clutter
-	if len(prompt) < 5 || len(response) < 5 {
-		return
-	}
-
-	// Store in memory as a single combined exchange entry (avoids
-	// flooding memory with separate query/response records).
-	promptLen := len([]rune(prompt))
-	respLen := len([]rune(response))
-	if promptLen > 10 && respLen > 10 {
-		a.memory.Remember(
-			fmt.Sprintf("Q: %s\nA: %s", TruncateStr(prompt, 100), TruncateStr(response, 100)),
-			"exchange",
-			[]string{"conversation"},
-		)
-	}
-
-	// Pattern learning — only for substantial responses, limited to 100 skills
-	// NOTE: outer a.mu.Lock() is already held via defer at function entry.
-	// Do NOT lock again — sync.RWMutex is not reentrant in Go.
-	if len(response) > 100 && len(a.skills) < 100 {
-		pattern := detectPromptType(prompt)
-		// Avoid duplicate patterns for the same prompt type
-		alreadyExists := false
-		for _, s := range a.skills {
-			if s.Pattern == fmt.Sprintf("prompt_type=%s", pattern) {
-				alreadyExists = true
-				break
-			}
-		}
-		if !alreadyExists {
-			skill := LearnedSkill{
-				Name:        fmt.Sprintf("pattern_%s", pattern),
-				Description: TruncateStr(response, 100),
-				Pattern:     fmt.Sprintf("prompt_type=%s", pattern),
-				Confidence:  0.3,
-				LearnedAt:   time.Now(),
-				UsedCount:   0,
-			}
-			a.skills = append(a.skills, skill)
-
-			// Record evolution when a new skill is learned
-			a.evolutions = append(a.evolutions, Evolution{
-				ID:          fmt.Sprintf("evo_%d", len(a.evolutions)+1),
-				Before:      fmt.Sprintf("skills_count=%d", len(a.skills)-1),
-				After:       fmt.Sprintf("skills_count=%d", len(a.skills)),
-				Reason:      fmt.Sprintf("auto-learned pattern: %s", pattern),
-				Timestamp:   time.Now(),
-				EffectScore: skill.Confidence,
-			})
-		}
-	}
-
-	// Cap evolutions to prevent unbounded growth
-	if len(a.evolutions) > 1000 {
-		a.evolutions = a.evolutions[len(a.evolutions)-500:]
-	}
-}
-
-// learnFromExchange uses the LLM to decide if a reusable skill should be
+// autoLearn uses the LLM to decide if a reusable skill should be
 // learned from this exchange. Ported from the Python eling-agent's
 // learn_from_exchange() function.
-func (a *Agent) learnFromExchange(prompt, response string) {
+func (a *Agent) autoLearn(prompt, response string) {
 	// Only run if enabled and we have a provider
 	if !a.cfg.Agent.LearnFromExchange {
 		return
@@ -2317,7 +2227,7 @@ If learn is false: {"learn": false}`
 
 	resp, err := prov.Chat(ctx, messages)
 	if err != nil {
-		log.Printf("learnFromExchange: provider error: %v (skipping)", err)
+		log.Printf("autoLearn: provider error: %v (skipping)", err)
 		return
 	}
 
@@ -2339,7 +2249,7 @@ If learn is false: {"learn": false}`
 		Body    string `json:"body"`
 	}
 	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		log.Printf("learnFromExchange: failed to parse LLM response: %v", err)
+		log.Printf("autoLearn: failed to parse LLM response: %v", err)
 		return
 	}
 
@@ -2353,14 +2263,14 @@ If learn is false: {"learn": false}`
 
 	// Quality heuristic: require meaningful body content
 	if len(body) < 50 {
-		log.Printf("learnFromExchange: skill %q body too short (%d chars), skipping", name, len(body))
+		log.Printf("autoLearn: skill %q body too short (%d chars), skipping", name, len(body))
 		return
 	}
 
 	// Quality heuristic: reject overly generic names
 	genericNames := map[string]bool{"fix": true, "debug": true, "help": true, "solve": true, "patch": true, "workaround": true}
 	if genericNames[strings.ToLower(name)] {
-		log.Printf("learnFromExchange: skill name %q too generic, skipping", name)
+		log.Printf("autoLearn: skill name %q too generic, skipping", name)
 		return
 	}
 
@@ -2369,7 +2279,7 @@ If learn is false: {"learn": false}`
 	defer a.mu.Unlock()
 	for _, s := range a.skills {
 		if s.Name == name {
-			log.Printf("learnFromExchange: skill %q already exists, skipping", name)
+			log.Printf("autoLearn: skill %q already exists, skipping", name)
 			return
 		}
 	}
@@ -2378,7 +2288,6 @@ If learn is false: {"learn": false}`
 	skill := LearnedSkill{
 		Name:        name,
 		Description: TruncateStr(body, 100),
-		Pattern:     "learned:" + name,
 		Confidence:  0.5,
 		LearnedAt:   time.Now(),
 		UsedCount:   0,
@@ -2415,114 +2324,7 @@ If learn is false: {"learn": false}`
 		EffectScore: 0.5,
 	})
 
-	log.Printf("learnFromExchange: learned new skill: %s", name)
-}
-
-// saveConversationToMemory indexes conversation turns into the semantic
-// search index so they can be found later by meaning (using semantic_search).
-// This is the key feature the user requested: "save every conversation as memory".
-// Conversations are stored with tags "conversation" and "auto-saved", and
-// can be retrieved by searching semantically (not just keyword matching).
-//
-// inferConversationTags derives meaningful tags from conversation content
-// so memories can be better distinguished, sorted, and pruned by category.
-// This prevents all auto-saved memories from having the same tags, which
-// made it hard for forgetWeakest to preserve diverse memories.
-func inferConversationTags(prompt string) []string {
-	tags := []string{"conversation", "auto-saved"}
-
-	// Detect common prompt categories
-	lower := strings.ToLower(prompt)
-	if strings.Contains(lower, "code") || strings.Contains(lower, "function") ||
-		strings.Contains(lower, "implement") || strings.Contains(lower, "fix") ||
-		strings.Contains(lower, "bug") || strings.Contains(lower, "refactor") ||
-		strings.Contains(lower, "test") {
-		tags = append(tags, "coding")
-	}
-	if strings.Contains(lower, "search") || strings.Contains(lower, "find") ||
-		strings.Contains(lower, "look up") || strings.Contains(lower, "what is") ||
-		strings.Contains(lower, "how to") {
-		tags = append(tags, "research")
-	}
-	if strings.Contains(lower, "config") || strings.Contains(lower, "setup") ||
-		strings.Contains(lower, "install") || strings.Contains(lower, "deploy") {
-		tags = append(tags, "setup")
-	}
-	if strings.Contains(lower, "error") || strings.Contains(lower, "fail") ||
-		strings.Contains(lower, "panic") || strings.Contains(lower, "crash") {
-		tags = append(tags, "error")
-	}
-	if strings.Contains(lower, "explain") || strings.Contains(lower, "what does") ||
-		strings.Contains(lower, "why does") || strings.Contains(lower, "describe") {
-		tags = append(tags, "explanation")
-	}
-	if strings.Contains(lower, "memory") || strings.Contains(lower, "remember") ||
-		strings.Contains(lower, "recall") || strings.Contains(lower, "forget") {
-		tags = append(tags, "memory")
-	}
-
-	// Cap tags to avoid tag bloat
-	if len(tags) > 5 {
-		tags = tags[:5]
-	}
-	return tags
-}
-
-// Rate-limited: only saves every 3rd turn to prevent flooding memory and
-// the semantic index with near-duplicate entries.  Every turn is still
-// stored in the session (full context) — this only throttles the extra
-// indexing into searchable memories.
-func (a *Agent) saveConversationToMemory(prompt, response string) {
-	if !a.cfg.Agent.SaveConversation {
-		return
-	}
-	if prompt == "" || response == "" {
-		return
-	}
-
-	// Throttle: save only every 3rd turn.  Uses atomic counter so
-	// concurrent saves are safe without holding a.mu for the whole op.
-	saveTurn := a.saveTurnCounter.Add(1)%3 == 0
-	if !saveTurn {
-		return
-	}
-
-	// Derive content-based tags so memories are distinguishable
-	tags := inferConversationTags(prompt)
-
-	// Build a structured conversation record for the semantic index.
-	// Include both the user's query and the assistant's response so
-	// semantic search can find it by matching either side.
-	content := fmt.Sprintf("User: %s\n\nAssistant: %s", prompt, response)
-
-	// Get the current session name for metadata
-	a.mu.RLock()
-	sessionName := a.sessionName
-	a.mu.RUnlock()
-
-	// Index into the semantic search index (vector embeddings).
-	// The embedding is computed eagerly so it's immediately searchable.
-	tools.AddToSemanticIndex(tools.SemanticIndexItem{
-		Content:   content,
-		Category:  "conversation",
-		Tags:      tags,
-		Timestamp: time.Now(),
-		Metadata: map[string]string{
-			"session": sessionName,
-			"type":    "conversation_turn",
-		},
-	})
-
-	// Also save a compressed version into the basic memory (substring-searchable)
-	// so it can be found by /recall even without the embedding API.
-	a.mu.RLock()
-	saveMem := a.memory
-	a.mu.RUnlock()
-	if saveMem != nil {
-		// Extract key topics from the prompt for better recall
-		summary := TruncateStr(prompt, 200)
-		saveMem.Remember(fmt.Sprintf("Conversation: %s", summary), "conversation", tags)
-	}
+	log.Printf("autoLearn: learned new skill: %s", name)
 }
 
 // extractGoFiles scans tool results for .go file paths.
@@ -2621,33 +2423,6 @@ func (a *Agent) autoTest(results []provider.Message) string {
 	log.Printf("autoTest: failures:\n%s", failSummary)
 
 	return fmt.Sprintf("*Auto-test found failures:*\n```\n%s\n```\n*Fix the test(s) above and re-run.*", failSummary)
-}
-
-func detectPromptType(prompt string) string {
-	lower := toLower(prompt)
-	switch {
-	case containsAny(lower, "code", "function", "implement", "write", "create", "generate", "fix"):
-		return "coding"
-	case containsAny(lower, "search", "find", "look up", "what is", "who is"):
-		return "research"
-	case containsAny(lower, "explain", "how", "why", "describe", "tell me"):
-		return "explanation"
-	default:
-		return "general"
-	}
-}
-
-func toLower(s string) string {
-	return strings.ToLower(s)
-}
-
-func containsAny(s string, substrs ...string) bool {
-	for _, sub := range substrs {
-		if strings.Contains(s, sub) {
-			return true
-		}
-	}
-	return false
 }
 
 // TruncateStr truncates a string to n runes, appending "..." if truncated.

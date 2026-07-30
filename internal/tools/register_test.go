@@ -113,12 +113,13 @@ func TestRegisterToolMissingName(t *testing.T) {
 }
 
 func TestRegisterSkill(t *testing.T) {
-	result, err := registerSkillExecute(map[string]interface{}{
+	result, err := registerToolExecute(map[string]interface{}{
 		"name":        "test_skill",
 		"description": "A test skill",
+		"type":        "skill",
 	})
 	if err != nil {
-		t.Fatalf("registerSkillExecute failed: %v", err)
+		t.Fatalf("registerToolExecute failed: %v", err)
 	}
 	res := result.(Result)
 	if !res.Success {

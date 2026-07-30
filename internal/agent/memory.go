@@ -1,16 +1,13 @@
 package agent
 
 import (
-	"context"
 	"fmt"
-	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"eling/internal/logger"
 	"eling/internal/tools"
 )
 
@@ -27,13 +24,11 @@ type MemoryItem struct {
 
 // Memory manages short-term and long-term memory for the agent.
 type Memory struct {
-	mu          sync.RWMutex
-	Items       []MemoryItem       `json:"items"`      // long-term storage
-	ShortTerm   []MemoryItem       `json:"short_term"` // recent context window
-	MaxShort    int                `json:"max_short"`
-	MaxLong     int                `json:"max_long"`
-	decayStop   chan struct{}      // signals decay goroutine to stop
-	decayCancel context.CancelFunc // cancels decay goroutine context
+	mu        sync.RWMutex
+	Items     []MemoryItem `json:"items"`      // long-term storage
+	ShortTerm []MemoryItem `json:"short_term"` // recent context window
+	MaxShort  int          `json:"max_short"`
+	MaxLong   int          `json:"max_long"`
 }
 
 // NewMemory creates a new Memory store.
@@ -43,7 +38,6 @@ func NewMemory() *Memory {
 		ShortTerm: make([]MemoryItem, 0),
 		MaxShort:  50,
 		MaxLong:   1000,
-		decayStop: make(chan struct{}),
 	}
 }
 
@@ -222,117 +216,6 @@ func (m *Memory) ItemsData() []tools.MemoryItemData {
 		})
 	}
 	return out
-}
-
-// StartDecay begins a background goroutine that decays memory strength
-// at the given interval. Each tick, all items have their Strength reduced
-// by decayRate (0.0-1.0). Items that fall below 0.1 are removed.
-// Call StopDecay to halt.  This is safe to call multiple times; any
-// previously-running decay goroutine is stopped before starting a new one.
-func (m *Memory) StartDecay(interval time.Duration, decayRate float64) {
-	m.mu.Lock()
-	// Cancel any previous decay context
-	if m.decayCancel != nil {
-		m.decayCancel()
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	m.decayCancel = cancel
-	stopCh := m.decayStop
-	m.mu.Unlock()
-
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				if gl := logger.Global(); gl != nil {
-					gl.Panic(r)
-				}
-				logger.WriteCrashReport(r, string(debug.Stack()))
-			}
-		}()
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				m.mu.Lock()
-				// Check for cancellation before doing work so StopDecay
-				// doesn't have to wait for a running decayOnce to finish.
-				select {
-				case <-ctx.Done():
-					m.mu.Unlock()
-					return
-				default:
-				}
-				m.decayOnce(decayRate)
-				m.mu.Unlock()
-			case <-stopCh:
-				return
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-}
-
-// StopDecay stops the background decay goroutine.
-// Safe to call multiple times.  Does not block waiting for an in-flight
-// decay tick — the goroutine checks for cancellation on the next tick.
-func (m *Memory) StopDecay() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.decayCancel != nil {
-		m.decayCancel()
-		m.decayCancel = nil
-	}
-	if m.decayStop != nil {
-		// Set to nil BEFORE closing to prevent a second caller from
-		// closing the same channel again (panic: close of closed channel).
-		ch := m.decayStop
-		m.decayStop = nil
-		select {
-		case <-ch:
-			// Already closed
-		default:
-			close(ch)
-		}
-	}
-}
-
-// decayOnce applies one round of strength decay to all items.
-// Items with Strength < 0.1 are removed.
-func (m *Memory) decayOnce(rate float64) {
-	// Decay long-term items
-	keep := make([]MemoryItem, 0, len(m.Items))
-	for i := range m.Items {
-		m.Items[i].Strength -= rate
-		if m.Items[i].Strength < 0 {
-			m.Items[i].Strength = 0
-		}
-		if m.Items[i].Strength >= 0.1 {
-			keep = append(keep, m.Items[i])
-		}
-	}
-	// Zero out trailing elements for GC
-	for i := len(keep); i < len(m.Items); i++ {
-		m.Items[i] = MemoryItem{}
-	}
-	m.Items = keep
-
-	// Decay short-term items
-	keepST := make([]MemoryItem, 0, len(m.ShortTerm))
-	for i := range m.ShortTerm {
-		m.ShortTerm[i].Strength -= rate
-		if m.ShortTerm[i].Strength < 0 {
-			m.ShortTerm[i].Strength = 0
-		}
-		if m.ShortTerm[i].Strength >= 0.1 {
-			keepST = append(keepST, m.ShortTerm[i])
-		}
-	}
-	for i := len(keepST); i < len(m.ShortTerm); i++ {
-		m.ShortTerm[i] = MemoryItem{}
-	}
-	m.ShortTerm = keepST
 }
 
 func contains(s, substr string) bool {

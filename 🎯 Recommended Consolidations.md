@@ -1,5 +1,12 @@
 # 🎯 Recommended Consolidations — Execution Plan
 
+> **Status: ✅ Groups A, B, C COMPLETE | 🚧 Group D IN PROGRESS | Last updated: 2025-07-30**
+
+```text
+Progress:  ████████████░░░░░░  75% (3 of 4 groups done)
+Groups:    A ✅ B ✅ C ✅ D 🚧
+```
+
 **Goal:** Eliminate all redundant/duplicate/dead code while preserving **every externally visible behavior** — every tool the LLM can call, every TUI command, every CLI flag, every API endpoint, every persistence mechanism.
 
 **Strategy:** 4 parallelizable execution groups. Groups A, B, C are **independent** (different files/different concerns). Group D depends on understanding `Brain.Query()` return type.
@@ -46,7 +53,7 @@ Day 3+: Group D — Semantic Search Unification (🔴 High risk) ← only if nee
 
 ---
 
-### A0. Move MCP Skill out of `skills` package ⚠️ CRITICAL — MUST DO FIRST
+### A0. Move MCP Skill out of `skills` package ⚠️ CRITICAL — MUST DO FIRST ✅
 
 The 482-line `internal/skills/mcp_skill.go` is in `package skills` and provides 7 exported functions used by `main.go`. Before removing the `skills` package, this file must be relocated.
 
@@ -142,7 +149,7 @@ go run . --help 2>&1 | grep mcp-server
 
 ---
 
-### A1. Remove `internal/skills/skills.go` and `internal/skills/skills_test.go`
+### A1. Remove `internal/skills/skills.go` and `internal/skills/skills_test.go` ✅
 
 These files contain `Manager`, `Skill`, 3 built-ins (`echo`, `math_eval`, `web_search`). All 3 are already served by `tools.Registry`:
 - `echo` → `tools/register.go` (the `echo` tool)
@@ -155,7 +162,7 @@ rm internal/skills/skills.go internal/skills/skills_test.go
 
 ---
 
-### A2. Remove `SkillManager` field from Agent struct
+### A2. Remove `SkillManager` field from Agent struct ✅
 
 **Edit `/root/eling/internal/agent/agent.go`:**
 
@@ -169,7 +176,7 @@ rm internal/skills/skills.go internal/skills/skills_test.go
 
 ---
 
-### A3. Remove `skMgr` creation and `SkillManager` init from `NewAgent()`
+### A3. Remove `skMgr` creation and `SkillManager` init from `NewAgent()` ✅
 
 ```go
 // BEFORE (line 199):
@@ -187,7 +194,7 @@ rm internal/skills/skills.go internal/skills/skills_test.go
 
 ---
 
-### A4. Remove the skills bridge loop in `NewAgent()` (lines 223-241)
+### A4. Remove the skills bridge loop in `NewAgent()` (lines 223-241) ✅
 
 ```go
 // BEFORE:
@@ -205,7 +212,7 @@ rm internal/skills/skills.go internal/skills/skills_test.go
 
 ---
 
-### A5. Change `ListSkills()` to query `ToolRegistry`
+### A5. Change `ListSkills()` to query `ToolRegistry` ✅
 
 ```go
 // BEFORE:
@@ -228,7 +235,7 @@ func (a *Agent) ListSkills() []tools.Tool {
 
 ---
 
-### A6. Remove `SkillManager.Register()` calls from `AddPluginFromCommand()`, `AddSkill()`, `restoreDynamicTool()`
+### A6. Remove `SkillManager.Register()` calls from `AddPluginFromCommand()`, `AddSkill()`, `restoreDynamicTool()` ✅
 
 **Edit `AddPluginFromCommand()` (lines 1541-1549) — remove the "Also register as a skill" block:**
 
