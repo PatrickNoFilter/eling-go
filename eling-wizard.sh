@@ -364,7 +364,10 @@ step_provider() {
   echo -e "  ${CYAN} 8)${NC}  ${BOLD}OpenCode Zen${NC}   ${DIM}- deepseek-v4-flash (free tier available)${NC}"
   echo -e "             ${DIM}  https://opencode.ai/zen/v1${NC}"
   echo
-  echo -e "  ${CYAN} 9)${NC}  ${BOLD}Custom / Ollama${NC}${DIM}- Local models, any OpenAI-compatible API${NC}"
+  echo -e "  ${CYAN} 9)${NC}  ${BOLD}TokenRouter${NC}    ${DIM}- deepseek/deepseek-v4-flash, many models via one API${NC}"
+  echo -e "             ${DIM}  https://api.tokenrouter.com/v1${NC}"
+  echo
+  echo -e "  ${CYAN}10)${NC}  ${BOLD}Custom / Ollama${NC}${DIM}- Local models, any OpenAI-compatible API${NC}"
   echo
   echo -e "  ${CYAN} 0)${NC}  ${BOLD}Skip${NC}           ${DIM}- Keep current configuration${NC}"
   echo
@@ -372,7 +375,7 @@ step_provider() {
   echo
   
   local choice
-  prompt "Enter your choice [1-9, or 0 to skip]:"
+  prompt "Enter your choice [1-10, or 0 to skip]:"
   read -r choice
 
   case "$choice" in
@@ -424,7 +427,12 @@ step_provider() {
       fi
       result_base_url="https://opencode.ai/zen/v1"
       ;;
-    9) # Custom
+    9) # TokenRouter
+      result_provider="tokenrouter"
+      result_model="deepseek/deepseek-v4-flash"
+      result_base_url="https://api.tokenrouter.com/v1"
+      ;;
+    10) # Custom
       step_custom_provider result_provider result_model result_base_url
       ;;
     0|"") # Skip
@@ -508,7 +516,7 @@ step_api_key() {
   fi
 
   # Check environment variables
-  local env_keys=("OPENAI_API_KEY" "GROQ_API_KEY" "ANTHROPIC_API_KEY" "DEEPSEEK_API_KEY" "OPENROUTER_API_KEY" "TOGETHER_API_KEY" "GOOGLE_API_KEY")
+  local env_keys=("OPENAI_API_KEY" "GROQ_API_KEY" "ANTHROPIC_API_KEY" "DEEPSEEK_API_KEY" "OPENROUTER_API_KEY" "TOGETHER_API_KEY" "GOOGLE_API_KEY" "TOKENROUTER_API_KEY")
   for env_var in "${env_keys[@]}"; do
     local val="${!env_var:-}"
     if [ -n "$val" ]; then
@@ -596,6 +604,13 @@ step_model() {
       echo -e "    ${CYAN}2)${NC} deepseek-v4-flash-free      ${DIM}(free tier)${NC}"
       echo -e "    ${CYAN}3)${NC} Enter custom model"
       ;;
+    *tokenrouter*)
+      echo -e "  ${BOLD}Recommended models for TokenRouter:${NC}"
+      echo -e "    ${CYAN}1)${NC} deepseek/deepseek-v4-flash  ${DIM}(responsive, reliable)${NC}"
+      echo -e "    ${CYAN}2)${NC} openai/gpt-4o-mini          ${DIM}(fast, cheap)${NC}"
+      echo -e "    ${CYAN}3)${NC} moonshotai/kimi-k3          ${DIM}(full)${NC}"
+      echo -e "    ${CYAN}4)${NC} Enter custom model"
+      ;;
     *)
       echo -e "  ${DIM}Enter the model name you want to use.${NC}"
       echo -e "  ${CYAN}1)${NC} $default_model (keep default)"
@@ -668,6 +683,18 @@ step_model() {
         1) result_model="deepseek-v4-flash" ;;
         2) result_model="deepseek-v4-flash-free" ;;
         3)
+          prompt "Enter custom model name:"
+          read -r result_model
+          ;;
+        *) result_model="$default_model" ;;
+      esac
+      ;;
+    *tokenrouter*)
+      case "$model_choice" in
+        1) result_model="deepseek/deepseek-v4-flash" ;;
+        2) result_model="openai/gpt-4o-mini" ;;
+        3) result_model="moonshotai/kimi-k3" ;;
+        4)
           prompt "Enter custom model name:"
           read -r result_model
           ;;
@@ -1017,11 +1044,25 @@ except Exception:
     echo -e "  ${DIM}Response body (first 300 chars):${NC}"
     echo -e "  ${DIM}${body:0:300}${NC}"
     echo
-    echo -e "  ${YELLOW}Possible issues:${NC}"
-    echo -e "    • Invalid API key"
-    echo -e "    • Wrong base URL or endpoint"
-    echo -e "    • Model name not recognized"
-    echo -e "    • Network/proxy issues"
+
+    # Smart error diagnosis
+    if [[ "$body" == *"insufficient_user_quota"* || "$body" == *"credit limit"* || "$body" == *"quota"* ]]; then
+      echo -e "  ${RED}${ICON_WARN}${NC} ${BOLD}Insufficient account credit detected!${NC}"
+      echo -e "    • Your API key is ${GREEN}valid${NC}, but the account balance is ${BOLD}\$0.00${NC}."
+      echo -e "    • Even 'free' models are blocked until you add credits."
+      echo -e "    • Add credits at: ${BOLD}https://tokenrouter.com${NC} (or your provider's billing page)."
+    elif [[ "$http_code" == *curl* || "$http_code" == *000* || "$http_code" == *error* || "$http_code" == *timeout* ]]; then
+      echo -e "  ${RED}${ICON_WARN}${NC} ${BOLD}Request timed out or no response!${NC}"
+      echo -e "    • The model did not respond within 30 seconds."
+      echo -e "    • The model may be unavailable/broken on the provider side."
+      echo -e "    • Try a different model (e.g. deepseek/deepseek-v4-flash) or re-run the wizard."
+    else
+      echo -e "  ${YELLOW}Possible issues:${NC}"
+      echo -e "    • Invalid API key"
+      echo -e "    • Wrong base URL or endpoint"
+      echo -e "    • Model name not recognized"
+      echo -e "    • Network/proxy issues"
+    fi
     echo
     warn "Configuration was still saved. You can fix and test later."
   fi

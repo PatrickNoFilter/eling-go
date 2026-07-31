@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
@@ -40,11 +39,22 @@ func killPreviousInstance() {
 			comm, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
 			if readErr == nil && strings.TrimSpace(string(comm)) == "eling" {
 				logger.Global().Info("Killing previous ELING instance (PID %d)", pid)
-				// Try SIGTERM first for graceful shutdown
-				_ = exec.Command("kill", "-15", fmt.Sprintf("%d", pid)).Run()
-				// Wait briefly, then SIGKILL if still alive
-				time.Sleep(500 * time.Millisecond)
-				_ = exec.Command("kill", "-9", fmt.Sprintf("%d", pid)).Run()
+				// Try SIGTERM first for graceful shutdown.
+				// Use syscall.Kill directly (not exec.Command) so signal delivery
+				// is not delayed by PRoot's ptrace of subprocesses.
+				_ = syscall.Kill(pid, syscall.SIGTERM)
+				// Wait for graceful shutdown (PRoot can add latency)
+				for i := 0; i < 10; i++ {
+					if syscall.Kill(pid, 0) != nil {
+						// Process is gone
+						return
+					}
+					time.Sleep(200 * time.Millisecond)
+				}
+				// Force kill if still alive
+				logger.Global().Warn("Previous instance (PID %d) did not exit after SIGTERM, sending SIGKILL", pid)
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				time.Sleep(200 * time.Millisecond)
 			}
 		}
 	}
@@ -147,7 +157,7 @@ func recoverWithStack(ag *agent.Agent) {
 	}
 }
 
-const Version = "0.1.0"
+const Version = "0.2.2"
 
 func main() {
 	apiKey := flag.String("api-key", "", "DeepSeek API key (or set DEEPSEEK_API_KEY env var)")
@@ -185,7 +195,7 @@ func main() {
 			"rollback": true, "link-stats": true, "linked-facts": true,
 			"evolve": true, "stats": true, "config": true, "init-rules": true,
 			"mcp": true, "continuum": true, "blackbox": true, "markdownify": true,
-			"sync": true, "install-opencode": true, "install-zero": true,
+			"sync": true, "setup": true, "install-opencode": true, "install-zero": true,
 			"install-termux": true, "help": true,
 			"export": true, "think": true, "verify": true,
 			"search-temporal": true, "version-history": true,
@@ -449,26 +459,26 @@ func main() {
 		os.Exit(0)
 	}()
 
-	// ── Fatal signal handler (SIGBUS, SIGSEGV) ──────────────────────────────
-	// These signals CANNOT be recovered with recover(). Go's signal.Notify
-	// will forward signals that do NOT originate from the Go runtime
-	// (e.g., hardware bus errors, memory-mapped I/O faults).
-	// Runtime-internal SIGSEGV (nil pointer, etc.) are still handled by
-	// Go's runtime and turned into panics caught by recoverWithStack.
-	// We use a separate channel with buffer=1 so the handler fires at most
-	// once and doesn't block.
+	// ── Fatal signal handler (SIGBUS only) ───────────────────────────────────
+	// NOTE: We do NOT catch SIGSEGV here because the Go runtime uses SIGSEGV
+	// internally for memory management (stack growth, etc.). Intercepting it
+	// via signal.Notify would prevent the runtime from handling it correctly,
+	// causing the program to crash on normal memory operations. Go already
+	// converts runtime-detected SIGSEGV (nil pointer dereference, etc.) into
+	// panics that are caught by recoverWithStack above.
+	// SIGBUS (bus error / memory-mapped I/O failure) is safe to catch — it is
+	// not used internally by the Go runtime and indicates genuine hardware or
+	// OS-level memory faults that warrant a crash report.
 	fatalSigCh := make(chan os.Signal, 1)
-	signal.Notify(fatalSigCh, syscall.SIGBUS, syscall.SIGSEGV)
+	signal.Notify(fatalSigCh, syscall.SIGBUS)
 	go func() {
 		sig := <-fatalSigCh
 		sigName := sig.String()
-		// Type assertion: os.Signal is typically syscall.Signal on Unix
 		sigNum := 0
 		sigVal, ok := sig.(syscall.Signal)
 		if ok {
 			sigNum = int(sigVal)
 		} else {
-			// Fallback: try to extract signal number from string
 			_, _ = fmt.Sscanf(sigName, "signal %d", &sigNum)
 		}
 		logger.BusErrorCrashHandler(sigName, sigNum)

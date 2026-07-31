@@ -71,6 +71,8 @@ session:
 |----------|-------------|---------|
 | `DEEPSEEK_API_KEY` | Primary API key for LLM providers | — |
 | `ELING_CONFIG` | Path to config file | `~/.eling/config.yaml` |
+| `ELING_BACKUP_DIR` | Central directory for `write`/`edit` auto-backups (mirrors source path) | next to source file |
+| `ELING_BACKUP_KEEP` | Number of `.bak.<timestamp>` snapshots to keep per file | `5` |
 
 ---
 
@@ -89,6 +91,14 @@ Flags:
   --session-name <name>  Name the current session
   --run <query>          Run a single query non-interactively
   --version              Print version and exit
+
+Setup subcommand (same wizard as eling-wizard.sh / eling-setup):
+  eling setup                            # interactive wizard
+  eling setup --list                     # view current config
+  eling setup --quick --provider X --api-key K --model M [--base-url U]
+  eling setup --add-provider [--provider X --model M --api-key K --base-url U]
+  eling setup --test                     # test the connection
+  eling setup --dedupe                   # remove exact-duplicate providers (same model + base_url + api_key)
 ```
 
 ---
@@ -104,6 +114,7 @@ ELING is compatible with any **OpenAI-compatible** API. This includes:
 | **OpenCode** | `https://opencode.ai/zen/v1` | Models: deepseek-v4-flash-free |
 | **Groq** | `https://api.groq.com/openai/v1` | Models: llama3-70b, mixtral-8x7b |
 | **OpenRouter** | `https://openrouter.ai/api/v1` | Models: claude-3.5, gpt-4o, gemini-2.0 |
+| **TokenRouter** | `https://api.tokenrouter.com/v1` | Models: deepseek/deepseek-v4-flash, many models via one API |
 | **Together** | `https://api.together.xyz/v1` | Models: llama-3.3-70b, mixtral |
 | **Anyscale** | `https://api.endpoints.anyscale.com/v1` | Models: llama-2, mixtral |
 | **Fireworks** | `https://api.fireworks.ai/inference/v1` | Models: llama-3, mixtral |
@@ -131,6 +142,7 @@ All state is persisted under `~/.eling/`:
 | `summary.txt` | Compressed conversation summary | Text |
 | `tools.json` | Dynamic tool registrations | JSON |
 | `turn_timeout_history.json` | Self-adaptive timeout data | JSON |
+| `*.bak.<timestamp>` | Auto-backups created before `write`/`edit` mutations (rotation keeps last 5) | Text |
 | `*-brain.db` | Brain layer databases (facts, code, kb, blackbox, continuum) | SQLite |
 | `sessions/*.json` | Saved conversation sessions | JSON |
 | `eling.log` | Application log | Text |
@@ -306,3 +318,15 @@ Used by `semantic_search` and `semantic_index` tools.
 
 **Caching:** Embeddings are cached in memory (up to 1000 entries) to reduce API calls.
 **Persistence:** Semantic search queries the 8-layer Brain (SQLite-backed) via RRF fusion, with an in-memory local trigram fallback for offline operation.
+
+---
+
+## DeepSeek Reasoning Content (`reasoning_content`)
+
+When using a DeepSeek thinking-mode model, the provider returns a `reasoning_content` field alongside the answer. ELING:
+
+1. **Persists it** with the assistant session entry (`AppendWithReasoning`), so resumed conversations can pass it back.
+2. **Includes it** in tool-loop follow-up assistant messages — DeepSeek rejects assistant messages that omit `reasoning_content` in thinking mode.
+3. **Streams it** to the TUI as "thinking" text via `ToolCallEvent.Reasoning`.
+
+The agent's `lastReasoning` is stored on every round (even empty) so stale reasoning from an earlier round never leaks into the final session save.

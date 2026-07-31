@@ -125,6 +125,33 @@ runToolLoop(ctx, prov, messages, toolDefs, maxDuration)
         └── updateConversationSummary() — context compression
 ```
 
+### Skill Auto-Learn Lifecycle
+
+```
+autoLearn() (LLM-judged exchange)
+    │
+    ├── Creates skill → registers in ToolRegistry (category:"skill")
+    ├── Persists via tools.AddDynamicTool() → tools.json   ← survives restart
+    ├── LoadState() re-registers skills.json entries into ToolRegistry
+    └── incrementSkillUsedCount() on every tool execution path
+        (Ask, runStreamToolLoop, UseTool)
+    │
+    └── Eviction (100-skill cap): evicts LOWEST UsedCount first
+        (usage-based, not just oldest LearnedAt)
+```
+
+Key behaviors:
+- `UsedCount` is incremented after all 3 tool-execution paths — eviction uses real usage data
+- Auto-learned skills persist to `tools.json` alongside user-defined tools
+- On restart, `LoadState()` re-registers restored skills into the Tool Registry (visible & callable)
+
+### Reasoning-Content Persistence
+
+DeepSeek thinking-mode models return a `reasoning_content` field alongside the answer. ELING stores `lastReasoning` on every round (even empty) and:
+1. Persists it with assistant session entries (`AppendWithReasoning`)
+2. Passes it back in tool-loop follow-up assistant messages (DeepSeek rejects messages that omit it in thinking mode)
+3. Streams it to the TUI as "thinking" text (`ToolCallEvent.Reasoning`)
+
 ### Self-Adaptive Timeout Mechanism
 
 ```
@@ -280,6 +307,26 @@ Execute(name, args)
 - **Bash output**: 512 KiB max (stdout + stderr combined)
 - **Tool result string**: 256 KiB max (rune-aware truncation)
 - **Running commands**: Tracked for Ctrl+C kill
+
+### Search: ugrep 7.5.0
+All `grep` tool calls resolve to **ugrep** via the `/usr/local/bin/grep` wrapper:
+- Fuzzy search (`-Z`), compressed archives (`-z`), JSON/CSV output
+- File-type filters (`-t`), boolean operators (`--bool`), smart case (`-S`), multi-line (`-U`)
+- Internal invocation: `grep -rn -I -F` (or `-E` for regex) with `-m 5000` per-file cap, `.git`/`node_modules`/`vendor` excluded, 1 MB output cap, 10 s timeout
+
+### Auto-Backup Before Mutation
+Every `write`/`edit` snapshots the existing file to `*.bak.<timestamp>` before mutating (no-op when content is identical):
+- Rotation keeps the last **5** backups per file (`ELING_BACKUP_KEEP` overrides)
+- `ELING_BACKUP_DIR` mirrors backups to a central directory (source path preserved)
+- Covered by `internal/tools/files_backup_test.go`
+
+### Web Timeout Prediction (`internal/tools/web_timeout.go`)
+`web_fetch` / `web_search` (v2.1.0) use a three-part predictor:
+1. **Preflight probe** — fast DNS + TCP reachability check; dead hosts fail in ~1.5s
+2. **Adaptive max-time** — per-host curl `--max-time` derived from recorded latency/failure history
+3. **Outcome recording** — every fetch feeds the model, so predictions improve over time
+
+Responses include a `timeout_prediction` object (host, latency, fail counts). Covered by `internal/tools/web_timeout_test.go`.
 
 ---
 
@@ -438,6 +485,44 @@ Response: {"jsonrpc":"2.0","id":1,"result":{"tools":[...]}}
 Request:  {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read","arguments":{"path":"/file"}}}
 Response: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"..."}]}}
 ```
+
+---
+
+## Layer 8: Terminal UI (`internal/tui/tui.go`)
+
+### 3-Panel Layout
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  MARQUEE: ✦ ELING — Auto-Learning Evolving AI Agent ✦    │  ← scrolling ticker (pink)
+│  HEADER:  Model | Session | Tokens | Mem% | MCP          │  ← light blue (Catppuccin)
+├──────────────────────────────────────────────────────────┤
+│  BODY: Scrollable conversation + tool output             │
+│        (syntax-highlighted, color-coded status)          │
+├──────────────────────────────────────────────────────────┤
+│  INPUT: > text · tool(args) · /command                   │
+│         paste-safe: multi-line held until deliberate Enter│
+└──────────────────────────────────────────────────────────┘
+```
+
+### Paste-Safe Input
+
+Pasting multi-line text no longer auto-sends each line. The TUI detects paste bursts two ways:
+
+1. **Bracketed-paste events** — terminals that emit `\x1b[200~` / `\x1b[201~` markers are handled directly.
+2. **Burst detection** — plain terminals: key sequences arriving faster than `pasteBurstWindow` (60 ms) are treated as a paste; a `pasteGrace` (350 ms) hold period keeps newlines as literal input after the burst.
+
+While pasting, `Enter` inserts a newline instead of submitting; the input shows `pasting… newlines are held`, then `multiline input — Enter to send` afterwards. Only a deliberate final `Enter` submits the buffer. Covered by `internal/tui/paste_test.go`.
+
+### Stale-Message Guard (`genMsg`)
+
+Each query submission increments a **generation counter**. Every message rendered into the viewport is wrapped in `genMsg{gen, msg}`; the Update loop discards any message whose generation doesn't match the current submission. This prevents late tool results/errors from a previous query's goroutine bleeding into the new conversation.
+
+### Thinking / Tool Progress
+
+- Reasoning text (including DeepSeek `reasoning_content`) streams into the body as thinking
+- Running tools show live elapsed timers; status colors reflect success/failure
+- Viewport supports `PgUp` / `PgDn` scrolling
 
 ---
 

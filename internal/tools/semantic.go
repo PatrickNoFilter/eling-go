@@ -553,7 +553,7 @@ func semanticSearchExecute(args map[string]interface{}) (interface{}, error) {
 		return OK(map[string]interface{}{
 			"query":   query,
 			"results": []SemanticResult{},
-			"message": "No semantically similar content found. Try indexing content first with semantic_index, or use grep for exact text matching.",
+			"message": "No semantically similar content found. Try indexing content first with semantic_index, or use grep (GNU grep) for exact text matching.",
 		}), nil
 	}
 

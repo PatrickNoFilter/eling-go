@@ -19,7 +19,7 @@ var (
 	crashLogDir     string
 	crashReportPath string
 	mainLogPath     string
-	crashPathsOnce  sync.Once
+	crashPathsOnce sync.Once
 )
 
 func initCrashPaths() {
@@ -215,8 +215,12 @@ func (l *Logger) Error(format string, args ...interface{}) {
 	stack := string(debug.Stack())
 	// Trim the stack to remove the logger's own frames
 	lines := strings.Split(stack, "\n")
-	if len(lines) > 7 {
+	// Guard: ensure we have enough frames before trimming
+	if len(lines) > 8 {
 		lines = lines[7:] // skip runtime/debug.Stack + logger frames
+	} else if len(lines) > 2 {
+		// Shallow stack — skip at least the first two lines
+		lines = lines[2:]
 	}
 	msg += "\nStack:\n" + strings.Join(lines, "\n")
 	l.writeSync(ERROR, msg)
@@ -228,8 +232,11 @@ func (l *Logger) Fatal(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	stack := string(debug.Stack())
 	lines := strings.Split(stack, "\n")
-	if len(lines) > 7 {
+	// Guard: ensure we have enough frames before trimming
+	if len(lines) > 8 {
 		lines = lines[7:]
+	} else if len(lines) > 2 {
+		lines = lines[2:]
 	}
 	msg += "\nStack:\n" + strings.Join(lines, "\n")
 	// Fatal writes synchronously and flushes
@@ -309,7 +316,7 @@ func (l *Logger) DetectCrash(pidFilePath string) (bool, string) {
 
 	// Read crash report from disk (written by WriteCrashReport / BusErrorCrashHandler)
 	// instead of checking the in-memory buffer, which is always empty for a new instance.
-	crashPathsOnce.Do(initCrashPaths)
+	initCrashPaths()
 	crashData, readErr := os.ReadFile(crashReportPath)
 	if readErr == nil {
 		// Return the last crash report entry
@@ -342,7 +349,7 @@ func (l *Logger) DetectCrash(pidFilePath string) (bool, string) {
 // This is a last-resort function that writes directly without locking,
 // to be safe even during a panic while holding locks.
 func WriteCrashReport(r interface{}, stack string) {
-	crashPathsOnce.Do(initCrashPaths)
+	initCrashPaths()
 
 	msg := fmt.Sprintf("=== CRASH REPORT %s ===\nError: %v\nStack:\n%s\n",
 		time.Now().Format(time.RFC3339), r, stack)
@@ -398,7 +405,7 @@ func SafePanicRecover(r interface{}, context string) bool {
 // After logging, it resets the signal to SIG_DFL and re-raises it so
 // the OS can produce a core dump (if enabled) and terminate the process.
 func BusErrorCrashHandler(signalName string, signalNum int) {
-	crashPathsOnce.Do(initCrashPaths)
+	initCrashPaths()
 
 	// Build crash message with timestamp
 	now := time.Now().Format(time.RFC3339)

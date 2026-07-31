@@ -64,11 +64,11 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 | Tool | Description |
 |------|-------------|
 | `bash` | Execute shell commands with timeout and output limits |
-| `read` / `write` / `edit` | Full file operations |
+| `read` / `write` / `edit` | Full file ops with **auto-backup** (timestamped `.bak`, rotation keeps 5) |
 | `ls` | Directory listing with metadata |
-| `grep` | Pattern search with regex, file type filter |
-| `web_search` | DuckDuckGo search (with fallback endpoints) |
-| `web_fetch` | URL content fetch via curl |
+| `grep` | Pattern search with regex, file type filter (**ugrep** 7.5.0 — fuzzy `-Z`, archives `-z`, JSON/CSV output, `--bool`, smart case `-S`) |
+| `web_search` | DuckDuckGo search (with fallback endpoints + timeout prediction) |
+| `web_fetch` | URL content fetch via curl (preflight probe + adaptive max-time) |
 | `register_tool` | Dynamically create new bash-wrapping tools (use `type=skill` for skills) |
 | `create_backup` | Timestamped ZIP backups |
 | `semantic_search` | Meaning-based vector search over indexed content |
@@ -79,10 +79,12 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 
 ### 🖥 Terminal UI (TUI)
 - **3-panel layout**: Header (status bar), Body (scrollable conversation), Input
+- **Scrolling marquee banner**: Pink animated ticker at the top (`✦ ELING — Auto-Learning Evolving AI Agent ✦`) scrolls continuously
 - **Syntax-highlighted** tool output with color-coded status (Catppuccin Mocha theme)
 - **Thinking indicators**: Reasoning text, tool call progress, elapsed timers
 - **Active tool tracking**: See running commands with live timers
 - **Scrollable history**: Viewport with pgup/pgdn
+- **Paste-safe input**: Multi-line pastes are held in the input box — newlines never auto-send (bracketed-paste + burst detection)
 - **Session-aware**: Displays current session, token usage, memory stats
 
 ### 📋 Session Management
@@ -111,6 +113,8 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 - **PID file management**: Single-instance enforcement with graceful kill
 - **Tool output limits**: 512 KiB cap per command, 256 KiB per tool result
 - **UTF-8 safe**: Rune-aware truncation prevents splitting multi-byte chars
+- **Auto-backup before write/edit**: Every `write`/`edit` snapshots the existing file to `*.bak.<timestamp>` (rotation keeps the last 5; configurable via `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP`)
+- **Web timeout prediction**: `web_fetch`/`web_search` do a fast DNS+TCP preflight probe (dead hosts fail in ~1.5s) and adapt `--max-time` per host based on observed latency/failure history
 - **Graceful shutdown**: Saves state on SIGTERM, SIGINT
 - **Auto-save**: Periodic state persistence (configurable)
 - **Fatal signal handler**: Catches SIGBUS/SIGSEGV for crash reporting
@@ -140,10 +144,56 @@ export DEEPSEEK_API_KEY="sk-your-key-here"
 
 ### First Run Wizard
 
-ELING has an interactive setup wizard:
+ELING's interactive setup wizard can be launched three ways — they are all **the same wizard**:
 
 ```bash
-./eling-wizard.sh
+./eling setup          # Same as eling-wizard (delegates to eling-wizard.sh)
+./eling-wizard.sh      # The interactive setup wizard
+./eling-setup          # Alias with the same interactive flow
+```
+
+`eling setup` runs the exact same wizard as `eling-wizard` (icons, banner,
+review step, connection test). Recommended flow — **choose provider first, then enter the API key**:
+
+```bash
+./eling setup
+```
+
+The interactive flow walks through, in order:
+1. **Provider** — pick from a menu (opencode-zen, opencode-zen-free, deepseek-direct, openai, groq, tokenrouter, or custom)
+2. **API Key** — enter the key for the provider you just selected (with a provider-specific hint for where to get one)
+3. **Model / Base URL** — confirm or override the provider defaults
+4. **System prompt** and **max context** (agent-level settings)
+5. **Review** — verify everything before saving
+6. **Test** — optional live API connection check
+
+> 💡 `eling setup` **delegates to `eling-wizard.sh`** whenever it's found — all three entry points
+> (`./eling setup`, `./eling-wizard.sh`, `./eling-setup`) run the identical interactive flow.
+> Extended flags the wizard doesn't support (`--add-provider`, `--test`, `--dedupe`) fall through
+> to the built-in Go implementation in `internal/cli/setup.go`.
+
+Non-interactive / quick setup (same flags for both commands):
+
+```bash
+./eling setup --list                          # View current config
+./eling setup --quick --provider openai --api-key "sk-..." --model gpt-4o
+./eling-wizard.sh --quick --provider groq --model llama-3.3-70b --api-key "gsk-..."
+```
+
+Add an extra provider without touching the current config (extended flag, built-in setup):
+
+```bash
+./eling setup --add-provider   # interactive: provider first, then its API key
+# or fully non-interactive:
+./eling setup --add-provider --provider groq --model llama-3.3-70b --api-key "gsk-..." --base-url "https://api.groq.com/openai/v1"
+```
+
+Other extended flags:
+
+```bash
+./eling setup --test            # Live API connection check after saving
+./eling setup --dedupe          # Remove exact-duplicate providers (same model + base_url + api_key)
+./eling setup --list            # Verify what's currently configured
 ```
 
 Or configure via command line:
@@ -220,10 +270,18 @@ edit(path=file.go, old_string=old code, new_string=new code)
 |-----|--------|
 | `Enter` | Send message |
 | `Alt+Enter` | New line in input |
+| `Paste` | Multi-line pasted text is **held** in the input box — newlines inside a paste never auto-send; press `Enter` afterwards to send |
 | `PgUp` / `PgDn` | Scroll conversation |
 | `↑` / `↓` | Input history navigation |
 | `Ctrl+C` | Interrupt current response (safe — context preserved) |
 | `Ctrl+D` | Exit |
+
+> 💡 **Paste safety:** ELING detects paste bursts (both bracketed-paste mode and
+> plain terminals). While pasting, `Enter` inserts a newline instead of
+> submitting, so you can paste long multi-line text/code, review it in the
+> input box, and only send it when you deliberately press `Enter`. A hint line
+> above the input shows `pasting… newlines are held` during the paste and
+> `multiline input — Enter to send` afterwards.
 
 ---
 
@@ -236,7 +294,10 @@ eling/
 ├── README.md                      # This file
 ├── DESIGN.md                      # Architecture design overview
 ├── eling-wizard.sh                # Interactive setup wizard
-├── start.sh                       # Quick start script
+├── eling-setup                    # Setup alias (same interactive flow)
+├── start.sh                       # Launcher with OS signal trapping (SIGBUS/SIGSEGV crash reports)
+├── rebuild.sh                     # Atomic rebuild (mv not cp — safe on overlayfs/proot)
+├── kill-eling.sh                  # Graceful shutdown helper
 ├── docs/
 │   ├── README.md                  # Documentation index
 │   ├── ARCHITECTURE.md            # Full system architecture (564 lines)
@@ -251,7 +312,8 @@ eling/
 │   │   ├── memory.go              # Memory: short/long-term, recall, FactsLayer-backed decay
 │   │   └── memory_test.go         # Memory unit tests
 │   ├── cli/
-│   │   └── cli.go                 # CLI subcommand handling
+│   │   ├── cli.go                 # CLI subcommand handling
+│   │   └── setup.go               # Built-in setup wizard (--add-provider, --test, delegation)
 │   ├── config/
 │   │   └── config.go              # YAML config loader, defaults, provider config
 │   ├── layers/                    # 🧠 8-Layer Memory Architecture (RRF fusion)
@@ -290,17 +352,21 @@ eling/
 │   ├── tools/
 │   │   ├── registry.go            # Dynamic tool registry (thread-safe, category-aware)
 │   │   ├── bash.go                # Shell execution with timeout + output limits
-│   │   ├── files.go               # read / write / edit / grep / ls
+│   │   ├── files.go               # read / write / edit / grep / ls (+ auto-backup before write/edit)
 │   │   ├── web.go                 # web_search + web_fetch (curl-based, fallback)
+│   │   ├── web_timeout.go         # fetchPredictor: preflight probe + adaptive max-time per host
 │   │   ├── register.go            # Dynamic tool/skill registration
 │   │   ├── backup.go              # create_backup + codebase-intelligence
 │   │   ├── schema.go              # JSON parameter schemas for all tools
 │   │   ├── semantic.go            # Semantic search (BrainQuery + local trigram)
 │   │   ├── setup.go               # eling_setup tool (config management)
 │   │   ├── ocr.go                 # Open Code Review integration
+│   │   ├── files_backup_test.go   # Auto-backup rotation tests
+│   │   ├── web_timeout_test.go    # Timeout predictor tests
 │   │   └── register_test.go       # Registration tests
 │   └── tui/
-│       └── tui.go                 # 3-panel Bubbletea TUI
+│       ├── tui.go                 # 3-panel Bubbletea TUI (marquee banner, paste-safe input)
+│       └── paste_test.go          # Paste-burst detection tests
 ├── skills/
 │   └── hermes/                    # Community skill scripts (hermes skills)
 │       ├── deep-web-research.sh
@@ -412,6 +478,23 @@ agent:
       base_url: "https://openrouter.ai/api/v1"
 ```
 
+### TokenRouter (Kimi K3, many models via one API)
+```yaml
+agent:
+  providers:
+    - name: "tokenrouter"
+      model: "deepseek/deepseek-v4-flash"
+      base_url: "https://api.tokenrouter.com/v1"
+```
+Grab a free API key at [tokenrouter.com](https://tokenrouter.com), then configure via the setup wizard:
+```bash
+./eling-wizard.sh          # select "9) TokenRouter"
+# or non-interactive:
+./eling-wizard.sh --quick --provider tokenrouter --api-key "sk-..." --model "deepseek/deepseek-v4-flash" --base-url "https://api.tokenrouter.com/v1"
+# or via eling-setup:
+./eling-setup --add-provider --provider tokenrouter --model deepseek/deepseek-v4-flash --base-url https://api.tokenrouter.com/v1 --api-key "sk-..."
+```
+
 ### Multiple Providers (Automatic Fallback)
 ```yaml
 agent:
@@ -485,11 +568,13 @@ ocr_health                                     # Check status
 ┌──────────────────────────────────────────────────────────┐
 │                    TUI (Bubbletea 3-Panel)               │
 │  ┌──────────────────────────────────────────────────┐    │
+│  │  MARQUEE: ✦ ELING — Auto-Learning… (scrolling)   │    │
 │  │  HEADER: Model | Session | Tokens | Mem% | MCP   │    │
 │  ├──────────────────────────────────────────────────┤    │
 │  │  BODY: Scrollable conversation log + tool output │    │
 │  ├──────────────────────────────────────────────────┤    │
 │  │  INPUT: > text entry · tool(args) · /command    │    │
+│  │         (paste-safe: multi-line held until Enter)│    │
 │  └──────────────────────────────────────────────────┘    │
 └──────────────────────┬───────────────────────────────────┘
                        │
@@ -508,6 +593,8 @@ ocr_health                                     # Check status
 │  │  MCP Client (JSON-RPC 2.0) · mcpskill tool          │ │
 │  │  Auto-Learning (autoLearn) | Evolution               │ │
 │  │  Self-Adaptive Timeout | Key Rotation               │ │
+│  │  Web Timeout Prediction | Auto-Backup (write/edit)  │ │
+│  │  DeepSeek reasoning_content persistence             │ │
 │  └─────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -523,6 +610,10 @@ ocr_health                                     # Check status
 7. **Unified skill management**: `ListSkills()` returns `[]tools.Tool` from the ToolRegistry (`category:"skill"`) — no separate `SkillManager`
 8. **No duplicate memory decay**: FactsLayer.ApplyDecay() handles all memory decay; the old in-memory `StartDecay()`/`StopDecay()` were removed during consolidation
 9. **Usage-based skill eviction**: Skills track their `UsedCount` and are evicted by lowest usage (not just age) when the 100-skill cap is reached
+10. **Auto-backup before every mutation**: `write`/`edit` snapshot the original file (`*.bak.<timestamp>`) with rotation (last 5) — no more lost code on bad edits; configurable via `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP`
+11. **Timeout prediction for web tools**: `fetchPredictor` runs a fast DNS+TCP preflight (dead hosts fail in ~1.5s) and adapts curl `--max-time` per host from recorded latency/failure history — slow or dead hosts can no longer hang the agent
+12. **Reasoning-content persistence**: DeepSeek `reasoning_content` is stored with assistant messages and passed back on tool-loop follow-ups and session resume (DeepSeek thinking mode rejects assistant messages that omit it)
+13. **Stale-message guard in TUI**: generation counters (`genMsg`) discard messages from old goroutines after a new query is submitted — no more late tool results bleeding into the wrong conversation
 
 ---
 
@@ -534,6 +625,7 @@ ocr_health                                     # Check status
 | **TUI Framework** | [Bubbletea](https://github.com/charmbracelet/bubbletea) | v1.3.10 |
 | **UI Components** | [Bubbles](https://github.com/charmbracelet/bubbles) | v1.0.0 |
 | **Styling** | [Lipgloss](https://github.com/charmbracelet/lipgloss) | v1.1.0 |
+| **Search** | [ugrep](https://github.com/Genivia/ugrep) | 7.5.0 (all `grep` calls — fuzzy, archives, JSON/CSV, `--bool`) |
 | **Config** | [yaml.v3](https://pkg.go.dev/gopkg.in/yaml.v3) | v3.0.1 |
 | **Spinner** | [spinner](https://github.com/briandowns/spinner) | v1.23.2 |
 | **LLM Provider** | Any OpenAI-compatible API | — |

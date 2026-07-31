@@ -62,7 +62,7 @@ var paramSchemas = map[string]map[string]interface{}{
 	"grep": {
 		"type": "object",
 		"properties": map[string]interface{}{
-			"query":       map[string]interface{}{"type": "string", "description": "Pattern to search for."},
+			"query":       map[string]interface{}{"type": "string", "description": "Pattern to search for (uses GNU grep)."},
 			"path":        map[string]interface{}{"type": "string", "description": "Directory or file to search in."},
 			"type":        map[string]interface{}{"type": "string", "description": "Optional file extension filter, e.g. 'go'."},
 			"regex":       map[string]interface{}{"type": "boolean", "description": "Treat query as a regular expression."},

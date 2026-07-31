@@ -25,6 +25,7 @@ type ToolCallData struct {
 type Entry struct {
 	Role      string         `json:"role"`
 	Content   string         `json:"content"`
+	Reasoning string         `json:"reasoning,omitempty"` // DeepSeek reasoning_content, replayed on resume
 	Timestamp time.Time      `json:"timestamp"`
 	Tokens    int            `json:"tokens,omitempty"`
 	ToolCalls []ToolCallData `json:"tool_calls,omitempty"`
@@ -81,8 +82,32 @@ func (m *Manager) Get(name string) (*Session, bool) {
 	return s, ok
 }
 
+// GetEntriesCopy returns a copy of the session's entries while holding the
+// session manager lock. This is safe for concurrent access because the copy
+// is made before releasing the lock. Use this instead of calling Get() and
+// then reading s.Entries outside the lock to avoid data races.
+func (m *Manager) GetEntriesCopy(name string) ([]Entry, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.sessions[name]
+	if !ok || s == nil {
+		return nil, false
+	}
+	entries := make([]Entry, len(s.Entries))
+	copy(entries, s.Entries)
+	return entries, true
+}
+
 // Append adds an entry to a session with optional tool call data.
 func (m *Manager) Append(name, role, content string, toolCalls ...ToolCallData) error {
+	return m.AppendWithReasoning(name, role, content, "", toolCalls...)
+}
+
+// AppendWithReasoning adds an entry with optional reasoning (DeepSeek
+// reasoning_content) and tool call data. Reasoning is persisted so that
+// resumed sessions can pass reasoning_content back to the API — DeepSeek
+// rejects assistant messages that omit it in thinking mode.
+func (m *Manager) AppendWithReasoning(name, role, content, reasoning string, toolCalls ...ToolCallData) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.sessions[name]
@@ -92,6 +117,7 @@ func (m *Manager) Append(name, role, content string, toolCalls ...ToolCallData) 
 	entry := Entry{
 		Role:      role,
 		Content:   content,
+		Reasoning: reasoning,
 		Timestamp: time.Now(),
 	}
 	if len(toolCalls) > 0 {

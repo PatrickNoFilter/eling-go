@@ -58,6 +58,8 @@ func RunCLI(cfg *config.Config, args []string) bool {
 		return cmdStats(cfg)
 	case "config":
 		return cmdConfig(cfg, subArgs)
+	case "setup":
+		return cmdSetup(cfg, subArgs)
 	case "contradictions":
 		return cmdContradictions(cfg, subArgs)
 	case "decay":
@@ -2093,7 +2095,9 @@ Statistics:
   stats                      Show brain statistics
 
 Configuration:
-  config get [key]           Get configuration value(s)
+  setup [--list]            Enter the setup wizard (interactive)
+  setup --api-key <key>     Quick setup with flags (non-interactive)
+  config get [key]          Get configuration value(s)
   config set <key> <val>     Set a configuration value
   config unset <key>         Reset a configuration key to default
   config list                List current configuration

@@ -208,7 +208,7 @@ func (s *Server) start(ctx context.Context) error {
 		"capabilities":    map[string]interface{}{},
 		"clientInfo": map[string]interface{}{
 			"name":    "eling",
-			"version": "0.1.0",
+			"version": "0.2.2",
 		},
 	})
 	if err != nil {

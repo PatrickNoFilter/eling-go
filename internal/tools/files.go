@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -25,8 +27,8 @@ func init() {
 	// Register write tool
 	DefaultRegistry.Register(Tool{
 		Name:        "write",
-		Description: "Write content to a file, creating directories if needed. Overwrites existing files.",
-		Version:     "1.0.0",
+		Description: "Write content to a file, creating directories if needed. Overwrites existing files. Automatically creates a timestamped .bak backup of the existing file before overwriting (rotation keeps the last 5 backups per file).",
+		Version:     "1.1.0",
 		Category:    "system",
 		Execute:     writeExecute,
 	})
@@ -34,8 +36,8 @@ func init() {
 	// Register edit tool (like jcode's edit)
 	DefaultRegistry.Register(Tool{
 		Name:        "edit",
-		Description: "Replace specific text in a file with new text. Uses exact string matching (not regex). Specify old_string and new_string.",
-		Version:     "1.0.0",
+		Description: "Replace specific text in a file with new text. Uses exact string matching (not regex). Specify old_string and new_string. Automatically creates a timestamped .bak backup before applying the edit (rotation keeps the last 5 backups per file).",
+		Version:     "1.1.0",
 		Category:    "system",
 		Execute:     editExecute,
 	})
@@ -176,6 +178,22 @@ func writeExecute(args map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("create directories: %w", err)
 	}
 
+	// No-op guard: if the file already has identical content, skip backup + write
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
+		return OK(map[string]interface{}{
+			"path":      path,
+			"written":   0,
+			"unchanged": true,
+			"backup":    "",
+		}), nil
+	}
+
+	// Automatic backup-before-write: snapshot the existing file
+	backupPath, err := backupFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("backup before write: %w", err)
+	}
+
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return nil, fmt.Errorf("write file: %w", err)
 	}
@@ -183,6 +201,7 @@ func writeExecute(args map[string]interface{}) (interface{}, error) {
 	return OK(map[string]interface{}{
 		"path":    path,
 		"written": len(content),
+		"backup":  backupPath,
 	}), nil
 }
 
@@ -233,6 +252,12 @@ func editExecute(args map[string]interface{}) (interface{}, error) {
 	// Generate unified diff
 	diff := buildDiff(path, content, newContent, oldStr, newStr)
 
+	// Automatic backup-before-edit: snapshot the original file
+	backupPath, err := backupFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("backup before edit: %w", err)
+	}
+
 	if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {
 		return nil, fmt.Errorf("write file: %w", err)
 	}
@@ -242,7 +267,94 @@ func editExecute(args map[string]interface{}) (interface{}, error) {
 		"edited":  true,
 		"changes": 1,
 		"diff":    diff,
+		"backup":  backupPath,
 	}), nil
+}
+
+// backupFile creates a timestamped snapshot of path before it is modified.
+// Returns the backup path, or "" if the file does not exist (nothing to back up).
+//
+// Default location: same directory as the source file, named <path>.bak.<timestamp>
+// (e.g. files.go.bak.20260801_120000).
+//
+// If the ELING_BACKUP_DIR environment variable is set, backups are mirrored under
+// that central directory using the absolute path of the source file.
+//
+// Rotation: only the most recent ELING_BACKUP_KEEP backups (default 5) per source
+// file are retained; older ones are deleted automatically.
+func backupFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil // nothing to back up
+		}
+		return "", fmt.Errorf("read file for backup: %w", err)
+	}
+
+	ts := time.Now().Format("20060102_150405")
+	backupPath := fmt.Sprintf("%s.bak.%s", path, ts)
+
+	if dir := os.Getenv("ELING_BACKUP_DIR"); dir != "" {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			abs = path
+		}
+		rel := strings.TrimPrefix(abs, string(filepath.Separator))
+		backupPath = filepath.Join(dir, rel+".bak."+ts)
+		if err := os.MkdirAll(filepath.Dir(backupPath), 0755); err != nil {
+			return "", fmt.Errorf("create backup dir: %w", err)
+		}
+	}
+
+	if err := os.WriteFile(backupPath, data, 0644); err != nil {
+		return "", fmt.Errorf("write backup: %w", err)
+	}
+
+	rotateBackups(path, backupPath)
+	return backupPath, nil
+}
+
+// rotateBackups removes the oldest backups for a source file, keeping only the
+// most recent ELING_BACKUP_KEEP (default 5) snapshots.
+func rotateBackups(originalPath, backupPath string) {
+	keep := 5
+	if s := os.Getenv("ELING_BACKUP_KEEP"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			keep = n
+		}
+	}
+
+	// Build a glob pattern matching all backups of this source file
+	var pattern string
+	if dir := os.Getenv("ELING_BACKUP_DIR"); dir != "" {
+		// Central dir mode: backupPath = <dir>/<rel>.bak.<ts>
+		base := filepath.Base(backupPath)
+		if idx := strings.LastIndex(base, ".bak."); idx >= 0 {
+			base = base[:idx]
+		}
+		pattern = filepath.Join(filepath.Dir(backupPath), base+".bak.*")
+	} else {
+		pattern = originalPath + ".bak.*"
+	}
+
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) <= keep {
+		return
+	}
+
+	// Sort by modification time ascending (oldest first)
+	sort.Slice(matches, func(i, j int) bool {
+		fi, errI := os.Stat(matches[i])
+		fj, errJ := os.Stat(matches[j])
+		if errI != nil || errJ != nil {
+			return matches[i] < matches[j]
+		}
+		return fi.ModTime().Before(fj.ModTime())
+	})
+
+	for _, m := range matches[:len(matches)-keep] {
+		_ = os.Remove(m)
+	}
 }
 
 // buildDiff uses diff -u to create a unified diff between old and new content.
@@ -398,40 +510,21 @@ func grepExecute(args map[string]interface{}) (interface{}, error) {
 		maxResults = int(n)
 	}
 
-	// Determine which grep binary to use: ugrep (faster) or standard grep
-	grepBin := "ugrep"
-	if _, err := exec.LookPath("ugrep"); err != nil {
-		grepBin = "grep"
-	}
+	// Use grep (system grep — resolves to GNU grep via /usr/local/bin/grep wrapper)
+	grepBin := "grep"
 
 	// Build grep command arguments
-	var grepArgs []string
-	if grepBin == "ugrep" {
-		// ugrep 7.x: use --exclude-dir (not --ignore-dir), no --no-ignore flag
-		grepArgs = []string{"-rn", "-I"}
-		if !isRegex {
-			grepArgs = append(grepArgs, "-F")
-		}
-		// Limit total output bytes to 10 MB to prevent OOM
-		grepArgs = append(grepArgs, "--max-output=10M")
-		grepArgs = append(grepArgs, "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=vendor", "--exclude-dir=.cache", "--exclude-dir=cache")
-		if fileType != "" {
-			grepArgs = append(grepArgs, "--include=*."+fileType)
-		}
-		grepArgs = append(grepArgs, query, path)
-	} else {
-		grepArgs = []string{"-rn", "--binary-files=without-match"}
-		if !isRegex {
-			grepArgs = append(grepArgs, "-F")
-		}
-		// Limit number of matches to 1000 to prevent OOM
-		grepArgs = append(grepArgs, "-m", "1000")
-		grepArgs = append(grepArgs, "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=vendor", "--exclude-dir=.cache", "--exclude-dir=cache")
-		if fileType != "" {
-			grepArgs = append(grepArgs, "--include=*."+fileType)
-		}
-		grepArgs = append(grepArgs, query, path)
+	grepArgs := []string{"-rn", "-I"}
+	if !isRegex {
+		grepArgs = append(grepArgs, "-F")
 	}
+	// Limit results via max-count to prevent OOM — cap at 5000 matches per file
+	grepArgs = append(grepArgs, "-m", "5000")
+	grepArgs = append(grepArgs, "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=vendor", "--exclude-dir=.cache", "--exclude-dir=cache")
+	if fileType != "" {
+		grepArgs = append(grepArgs, "--include=*."+fileType)
+	}
+	grepArgs = append(grepArgs, query, path)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -441,6 +534,13 @@ func grepExecute(args map[string]interface{}) (interface{}, error) {
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("search timed out after 10s")
+		}
+		// Check if this is an actual error (exit code 2) vs no-match (exit code 1)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if exitErr.ExitCode() == 2 {
+				// Real error — return it
+				return nil, fmt.Errorf("grep error: %s", strings.TrimSpace(string(out)))
+			}
 		}
 		// grep exits 1 when no match; that's not an error for us
 		if len(out) == 0 {

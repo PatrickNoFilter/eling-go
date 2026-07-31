@@ -324,11 +324,13 @@ print_config() {
 PROVIDER=""
 MODEL=""
 API_KEY=""
+API_KEY_FLAG=""
 BASE_URL=""
 SYSTEM_PROMPT=""
 MAX_CONTEXT=""
 ADD_PROVIDER=false
 LIST_MODE=false
+DEDUPE_MODE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -339,15 +341,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     --list)           LIST_MODE=true; shift ;;
     --add-provider)   ADD_PROVIDER=true; shift ;;
+    --dedupe)         DEDUPE_MODE=true; shift ;;
     --provider)       PROVIDER="$2"; shift 2 ;;
     --model)          MODEL="$2"; shift 2 ;;
-    --api-key)        API_KEY="$2"; shift 2 ;;
+    --api-key)        API_KEY="$2"; API_KEY_FLAG="1"; shift 2 ;;
     --base-url)       BASE_URL="$2"; shift 2 ;;
     --system-prompt)  SYSTEM_PROMPT="$2"; shift 2 ;;
     --max-context)    MAX_CONTEXT="$2"; shift 2 ;;
     *)
       error "Unknown argument: $1"
-      echo "Usage: $0 [--help] [--list] [--add-provider] [--provider NAME] [--model MODEL] [--api-key KEY] [--base-url URL] [--system-prompt PROMPT] [--max-context N]"
+      echo "Usage: $0 [--help] [--list] [--add-provider] [--dedupe] [--provider NAME] [--model MODEL] [--api-key KEY] [--base-url URL] [--system-prompt PROMPT] [--max-context N]"
       exit 1
       ;;
   esac
@@ -360,6 +363,87 @@ if $LIST_MODE; then
   exit 0
 fi
 
+# ── Dedupe providers ──────────────────────────────────────────────────────
+# Removes providers that are exact duplicates (same model + base_url + api_key),
+# keeping only the first occurrence of each unique provider configuration.
+if $DEDUPE_MODE; then
+  if [ ! -f "$CONFIG_FILE" ]; then
+    error "No config file found at $CONFIG_FILE"
+    exit 1
+  fi
+  info "Scanning $CONFIG_FILE for duplicate providers..."
+  python3 - "$CONFIG_FILE" <<'PYEOF'
+import re, sys, shutil, os, datetime
+
+cfg = sys.argv[1]
+with open(cfg) as f:
+    lines = f.readlines()
+
+# Locate providers: section
+prov_start = None
+for i, ln in enumerate(lines):
+    if re.match(r'^\s*providers:\s*$', ln):
+        prov_start = i
+        break
+if prov_start is None:
+    print(f"[INFO] No 'providers:' section found in {cfg}. Nothing to dedupe.")
+    sys.exit(0)
+
+# Parse provider blocks: each starts with a line matching  - name: ...
+providers = []  # list of (start_idx, end_idx, name, model, base_url, api_key)
+cur = None
+for i in range(prov_start + 1, len(lines)):
+    ln = lines[i]
+    if re.match(r'^[a-zA-Z_][a-zA-Z0-9_-]*:', ln):
+        break  # left providers section
+    m = re.match(r'^\s*-\s*name:\s*"?([^"]+?)"?\s*$', ln)
+    if m:
+        if cur:
+            cur['end'] = i
+            providers.append(cur)
+        cur = {'start': i, 'end': None, 'name': m.group(1), 'model': '', 'base_url': '', 'api_key': ''}
+    elif cur is not None:
+        mm = re.match(r'^\s*model:\s*"?([^"]+?)"?\s*$', ln)
+        if mm: cur['model'] = mm.group(1)
+        mm = re.match(r'^\s*base_url:\s*"?([^"]+?)"?\s*$', ln)
+        if mm: cur['base_url'] = mm.group(1)
+        mm = re.match(r'^\s*api_key:\s*"?([^"]+?)"?\s*$', ln)
+        if mm: cur['api_key'] = mm.group(1)
+if cur:
+    cur['end'] = len(lines)
+    providers.append(cur)
+
+# Find duplicates by (model, base_url, api_key)
+seen = {}
+dups = []
+for p in providers:
+    key = (p['model'], p['base_url'], p['api_key'])
+    if key in seen:
+        dups.append(p)
+    else:
+        seen[key] = p['name']
+
+if not dups:
+    print(f"[INFO] No duplicate providers found in {cfg}.")
+    sys.exit(0)
+
+# Backup
+bak = f"{cfg}.bak.{datetime.datetime.now():%Y%m%d%H%M%S}"
+shutil.copy2(cfg, bak)
+print(f"[INFO] Backed up config to {bak}")
+
+# Remove duplicate blocks (in reverse order to keep indices valid)
+for p in sorted(dups, key=lambda x: -x['start']):
+    del lines[p['start']:p['end']]
+    print(f"[INFO] Removed duplicate provider '{p['name']}' (same model/base_url/api_key as '{seen[(p['model'], p['base_url'], p['api_key'])]}')")
+
+with open(cfg, 'w') as f:
+    f.writelines(lines)
+print(f"[OK] Deduplication complete. {len(dups)} duplicate provider(s) removed.")
+PYEOF
+  exit $?
+fi
+
 # ── Load existing config values (if present) ──────────────────────────────
 EXISTING_MODEL=$(yaml_read "agent.default_model" "$CONFIG_FILE")
 EXISTING_BASE_URL=$(yaml_read "agent.default_base_url" "$CONFIG_FILE")
@@ -370,7 +454,7 @@ EXISTING_API_KEY=""
 if [ -f "$CONFIG_FILE" ]; then
   while IFS= read -r line; do
     stripped="${line#"${line%%[! ]*}"}"
-    if [[ "$stripped" =~ ^-name: ]]; then
+    if [[ "$stripped" =~ ^-+[[:space:]]*name: ]]; then
       # This is the first provider; read next lines for api_key
       for i in 1 2 3 4; do
         IFS= read -r nextline
@@ -395,6 +479,19 @@ fi
 [ -z "$BASE_URL" ] && BASE_URL="$EXISTING_BASE_URL" || true
 [ -z "$BASE_URL" ] && BASE_URL="https://opencode.ai/zen/v1" || true
 [ -z "$API_KEY" ] && API_KEY="$EXISTING_API_KEY" || true
+# When adding a provider, do NOT reuse the existing provider's key —
+# the user should be prompted for the new provider's own key (unless
+# provided via --api-key flag, which already populated API_KEY above).
+if $ADD_PROVIDER; then
+  if [ -z "${API_KEY_FLAG:-}" ]; then
+    API_KEY=""
+  fi
+fi
+# Only fall back to env var for the main (non-add) flow; when adding a
+# provider the user should be prompted for that provider's own key.
+if ! $ADD_PROVIDER; then
+  [ -z "$API_KEY" ] && API_KEY="${DEEPSEEK_API_KEY:-}" || true
+fi
 [ -z "$SYSTEM_PROMPT" ] && SYSTEM_PROMPT="$EXISTING_PROMPT" || true
 [ -z "$SYSTEM_PROMPT" ] && SYSTEM_PROMPT="You are ELING, an auto-learning evolving AI agent." || true
 [ -z "$MAX_CONTEXT" ] && MAX_CONTEXT="$EXISTING_CONTEXT" || true
@@ -406,33 +503,24 @@ if [ -t 0 ]; then
   INTERACTIVE=true
 fi
 
-if $INTERACTIVE && ! $ADD_PROVIDER; then
-  header "ELING Setup"
-  echo -e "Configure your ELING AI agent.\n"
-
-  # API Key
-  if [ -z "$API_KEY" ]; then
-    echo -e "${YELLOW}Enter your API key.${NC}"
-    echo -e "  If you don't have one, get it from: ${BOLD}https://opencode.ai${NC}"
-    echo -e "  ${YELLOW}(The key will be stored in ~/.eling/config.yaml)${NC}"
-    prompt "[API Key]:"
-    read -r API_KEY
-    while [ -z "$API_KEY" ]; do
-      error "API key cannot be empty."
-      prompt "[API Key]:"
-      read -r API_KEY
-    done
+if $INTERACTIVE; then
+  if $ADD_PROVIDER; then
+    header "ELING Setup — Add Provider"
+    echo -e "Add a new provider to your existing configuration.\n"
+  else
+    header "ELING Setup"
+    echo -e "Configure your ELING AI agent.\n"
   fi
 
-  # Provider
-  echo
+  # Provider (choose provider FIRST)
   echo -e "Available providers:"
   echo -e "  1) ${CYAN}opencode-zen${NC}      (deepseek-v4-flash,    https://opencode.ai/zen/v1)"
   echo -e "  2) ${CYAN}opencode-zen-free${NC} (deepseek-v4-flash-free, https://opencode.ai/zen/v1)"
   echo -e "  3) ${CYAN}deepseek-direct${NC}   (deepseek-v4-flash,    https://api.deepseek.com)"
   echo -e "  4) ${CYAN}openai${NC}            (gpt-4o,              https://api.openai.com/v1)"
   echo -e "  5) ${CYAN}groq${NC}              (llama-3.3-70b,       https://api.groq.com/openai/v1)"
-  echo -e "  6) ${CYAN}custom${NC}            (enter your own)"
+  echo -e "  6) ${CYAN}tokenrouter${NC}       (deepseek/deepseek-v4-flash, https://api.tokenrouter.com/v1)"
+  echo -e "  7) ${CYAN}custom${NC}            (enter your own)"
   echo
   prompt "[Provider] (default: 2):"
   read -r PROVIDER_CHOICE
@@ -444,7 +532,8 @@ if $INTERACTIVE && ! $ADD_PROVIDER; then
     3) PROVIDER="deepseek-direct";    MODEL="deepseek-v4-flash";       BASE_URL="https://api.deepseek.com" ;;
     4) PROVIDER="openai";             MODEL="gpt-4o";                  BASE_URL="https://api.openai.com/v1" ;;
     5) PROVIDER="groq";               MODEL="llama-3.3-70b";          BASE_URL="https://api.groq.com/openai/v1" ;;
-    6)
+    6) PROVIDER="tokenrouter";        MODEL="deepseek/deepseek-v4-flash"; BASE_URL="https://api.tokenrouter.com/v1" ;;
+    7)
       prompt "[Provider name]:"
       read -r PROVIDER
       prompt "[Model name]:"
@@ -452,22 +541,63 @@ if $INTERACTIVE && ! $ADD_PROVIDER; then
       prompt "[Base URL]:"
       read -r BASE_URL
       ;;
-    *) warn "Invalid choice, using opencode-zen-free" ;;
+    *) warn "Invalid choice, using opencode-zen-free"
+       PROVIDER="opencode-zen-free";  MODEL="deepseek-v4-flash-free";  BASE_URL="https://opencode.ai/zen/v1" ;;
   esac
 
-  # System prompt
+  # API Key (now prompted AFTER provider selection)
   echo
-  prompt "[System prompt] (default: current):"
-  read -r NEW_PROMPT
-  if [ -n "$NEW_PROMPT" ]; then
-    SYSTEM_PROMPT="$NEW_PROMPT"
+  if [ -z "$API_KEY" ]; then
+    case "$PROVIDER" in
+      opencode-zen|opencode-zen-free)
+        echo -e "${YELLOW}Enter your API key for ${BOLD}$PROVIDER${NC}${YELLOW}.${NC}"
+        echo -e "  If you don't have one, get it from: ${BOLD}https://opencode.ai${NC}"
+        ;;
+      deepseek-direct)
+        echo -e "${YELLOW}Enter your API key for ${BOLD}$PROVIDER${NC}${YELLOW}.${NC}"
+        echo -e "  If you don't have one, get it from: ${BOLD}https://platform.deepseek.com${NC}"
+        ;;
+      openai)
+        echo -e "${YELLOW}Enter your API key for ${BOLD}$PROVIDER${NC}${YELLOW}.${NC}"
+        echo -e "  If you don't have one, get it from: ${BOLD}https://platform.openai.com${NC}"
+        ;;
+      groq)
+        echo -e "${YELLOW}Enter your API key for ${BOLD}$PROVIDER${NC}${YELLOW}.${NC}"
+        echo -e "  If you don't have one, get it from: ${BOLD}https://console.groq.com${NC}"
+        ;;
+      tokenrouter)
+        echo -e "${YELLOW}Enter your API key for ${BOLD}$PROVIDER${NC}${YELLOW}.${NC}"
+        echo -e "  If you don't have one, get it from: ${BOLD}https://tokenrouter.com${NC}"
+        ;;
+      *)
+        echo -e "${YELLOW}Enter your API key for ${BOLD}$PROVIDER${NC}${YELLOW}.${NC}"
+        ;;
+    esac
+    echo -e "  ${YELLOW}(The key will be stored in ~/.eling/config.yaml)${NC}"
+    prompt "[API Key]:"
+    read -r API_KEY
+    while [ -z "$API_KEY" ]; do
+      error "API key cannot be empty."
+      prompt "[API Key]:"
+      read -r API_KEY
+    done
   fi
 
-  # Max context
-  prompt "[Max context tokens] (default: $MAX_CONTEXT):"
-  read -r NEW_CONTEXT
-  if [ -n "$NEW_CONTEXT" ]; then
-    MAX_CONTEXT="$NEW_CONTEXT"
+  # System prompt (agent-level, skipped when adding a provider)
+  if ! $ADD_PROVIDER; then
+    echo
+    prompt "[System prompt] (default: current):"
+    read -r NEW_PROMPT
+    if [ -n "$NEW_PROMPT" ]; then
+      SYSTEM_PROMPT="$NEW_PROMPT"
+    fi
+
+    # Max context
+    prompt "[Max context tokens] (default: $MAX_CONTEXT):"
+    read -r NEW_CONTEXT
+    if [ -n "$NEW_CONTEXT" ]; then
+      MAX_CONTEXT="$NEW_CONTEXT"
+    fi
   fi
 
   echo
@@ -493,8 +623,12 @@ echo -e "  ${BOLD}Config File:${NC}   $CONFIG_FILE"
 echo
 
 # Confirm for interactive
-if $INTERACTIVE && ! $ADD_PROVIDER; then
-  prompt "Save this configuration? [Y/n]:"
+if $INTERACTIVE; then
+  if $ADD_PROVIDER; then
+    prompt "Add this provider? [Y/n]:"
+  else
+    prompt "Save this configuration? [Y/n]:"
+  fi
   read -r CONFIRM
   if [[ "$CONFIRM" =~ ^[nN] ]]; then
     info "Aborted."
@@ -556,6 +690,32 @@ if $ADD_PROVIDER; then
       echo "      api_key: \"$API_KEY\"" >> "$CONFIG_FILE"
     fi
   else
+    # ── Content-based duplicate check ────────────────────────────────────
+    # Prevent adding a provider that is identical (model+base_url+api_key)
+    # to an existing one even if it has a different name.
+    DUP_NAME=$(awk -v m="$MODEL" -v b="$BASE_URL" -v k="$API_KEY" '
+      BEGIN { in_providers=0; cur=""; cmodel=""; cbase=""; ckey=""; }
+      /^[[:space:]]+providers:/ { in_providers=1; next; }
+      /^providers:/ { in_providers=1; next; }
+      in_providers && /^[a-zA-Z_]/ { in_providers=0; next; }
+      in_providers && /[[:space:]]*- name:/ {
+        cur = $0;
+        gsub(/^[[:space:]]*- name:[[:space:]]*"?/, "", cur);
+        gsub(/"?[[:space:]]*$/, "", cur);
+        cmodel=""; cbase=""; ckey="";
+        next;
+      }
+      in_providers && cur != "" && /model:/ { cmodel=$0; sub(/^[[:space:]]*model:[[:space:]]*"?/, "", cmodel); gsub(/"?[[:space:]]*$/, "", cmodel); next; }
+      in_providers && cur != "" && /base_url:/ { cbase=$0; sub(/^[[:space:]]*base_url:[[:space:]]*"?/, "", cbase); gsub(/"?[[:space:]]*$/, "", cbase); next; }
+      in_providers && cur != "" && /api_key:/ { ckey=$0; sub(/^[[:space:]]*api_key:[[:space:]]*"?/, "", ckey); gsub(/"?[[:space:]]*$/, "", ckey); if (cmodel==m && cbase==b && ckey==k) { print cur; exit; } cur=""; next; }
+      { next; }
+    ' "$CONFIG_FILE")
+    if [ -n "$DUP_NAME" ]; then
+      warn "Provider '$PROVIDER' is an exact duplicate of existing provider '$DUP_NAME' (same model, base_url, api_key). Skipping."
+      info "Provider '$PROVIDER' NOT added (deduplicated)."
+      exit 0
+    fi
+
     # Append new provider block before the 'ui:' section or at end
     has_ui=$(grep -c "^ui:" "$CONFIG_FILE" 2>/dev/null || echo 0)
     if [ "$has_ui" -gt 0 ]; then

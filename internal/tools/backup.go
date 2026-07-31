@@ -109,7 +109,7 @@ func codebaseIntelligenceExecute(args map[string]interface{}) (interface{}, erro
 	return OK(map[string]interface{}{
 		"note": "codebase-intelligence is a meta-skill that orchestrates the available code analysis tools. Use the following tools for codebase understanding:",
 		"tools_available": []string{
-			"grep - search for text patterns in files with regex support",
+			"grep - search for text patterns in files with regex support (uses GNU grep)",
 			"read - read file contents with line limits",
 			"ls - list directory contents",
 			"bash - execute shell commands (git log, find, etc.)",
@@ -118,7 +118,7 @@ func codebaseIntelligenceExecute(args map[string]interface{}) (interface{}, erro
 			"web_search - search the web for external documentation",
 		},
 		"query_received": query,
-		"hint":           "For deep codebase exploration: use grep for pattern matching, semantic_search for concept discovery, and bash for git history or structural analysis.",
+		"hint":           "For deep codebase exploration: use grep (GNU grep) for pattern matching, semantic_search for concept discovery, and bash for git history or structural analysis.",
 	}), nil
 }
 

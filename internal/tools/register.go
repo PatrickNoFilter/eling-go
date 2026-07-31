@@ -43,9 +43,19 @@ func SetDynamicTools(list []DynamicTool) {
 }
 
 // AddDynamicTool appends one tool and returns a copy of the updated list.
+// If a tool with the same name already exists, it is replaced (no duplicates).
 func AddDynamicTool(dt DynamicTool) []DynamicTool {
 	dynamicToolsMu.Lock()
 	defer dynamicToolsMu.Unlock()
+	// Replace existing tool with the same name instead of duplicating
+	for i, existing := range dynamicTools {
+		if existing.Name == dt.Name {
+			dynamicTools[i] = dt
+			out := make([]DynamicTool, len(dynamicTools))
+			copy(out, dynamicTools)
+			return out
+		}
+	}
 	dynamicTools = append(dynamicTools, dt)
 	out := make([]DynamicTool, len(dynamicTools))
 	copy(out, dynamicTools)

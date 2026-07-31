@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -21,6 +22,10 @@ type Tool struct {
 	Version     string                                                 `json:"version"`
 	Category    string                                                 `json:"category"` // system, skill, mcp, user
 	Execute     func(args map[string]interface{}) (interface{}, error) `json:"-"`
+	// ExecuteCtx is the optional context-aware variant. When set, ExecuteContext
+	// uses it so callers can cancel long-running tools (e.g. web_fetch) via a
+	// parent context deadline instead of blocking until the tool's own timeout.
+	ExecuteCtx func(ctx context.Context, args map[string]interface{}) (interface{}, error) `json:"-"`
 }
 
 // Result wraps a tool execution result.
@@ -147,6 +152,34 @@ func (r *Registry) Execute(name string, args map[string]interface{}) (result int
 		}
 	}()
 
+	return t.Execute(args)
+}
+
+// ExecuteContext runs a tool with context support. If the tool registered an
+// ExecuteCtx variant it is used (allowing cancellation / deadline propagation);
+// otherwise it falls back to the plain Execute (which cannot be cancelled).
+// Panics during tool execution are caught, logged, and returned as errors.
+func (r *Registry) ExecuteContext(ctx context.Context, name string, args map[string]interface{}) (result interface{}, err error) {
+	r.mu.RLock()
+	t, ok := r.tools[name]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("tool %q not found", name)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			stack := string(debug.Stack())
+			logger.Global().Error("Tool %q panicked: %v\nStack:\n%s", name, r, stack)
+			logger.WriteCrashReport(fmt.Errorf("tool %q panicked: %v", name, r), stack)
+			result = nil
+			err = fmt.Errorf("tool %q panicked: %v", name, r)
+		}
+	}()
+
+	if t.ExecuteCtx != nil {
+		return t.ExecuteCtx(ctx, args)
+	}
 	return t.Execute(args)
 }
 

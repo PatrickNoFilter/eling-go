@@ -1,11 +1,13 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 func init() {
@@ -13,9 +15,10 @@ func init() {
 	webSearchTool := Tool{
 		Name:        "web_search",
 		Description: "Search the web using DuckDuckGo or Bing. Returns a list of results with titles, URLs, and snippets.",
-		Version:     "2.0.0", // DNS-fixed: uses curl for reliable resolution on Android
+		Version:     "2.1.0", // timeout prediction: preflight + adaptive max-time + context cancel
 		Category:    "system",
 		Execute:     webSearchExecute,
+		ExecuteCtx:  webSearchExecuteCtx,
 	}
 	DefaultRegistry.Register(webSearchTool)
 
@@ -23,15 +26,21 @@ func init() {
 	webFetchTool := Tool{
 		Name:        "web_fetch",
 		Description: "Fetch the content of a URL and return it as text. Supports http/https URLs.",
-		Version:     "2.0.0", // DNS-fixed: uses curl for reliable resolution on Android
+		Version:     "2.1.0", // timeout prediction: preflight + adaptive max-time + context cancel
 		Category:    "system",
 		Execute:     webFetchExecute,
+		ExecuteCtx:  webFetchExecuteCtx,
 	}
 	DefaultRegistry.Register(webFetchTool)
 }
 
 // webSearchExecute searches the web.
 func webSearchExecute(args map[string]interface{}) (interface{}, error) {
+	return webSearchExecuteCtx(context.Background(), args)
+}
+
+// webSearchExecuteCtx is the context-aware web search implementation.
+func webSearchExecuteCtx(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	query, _ := args["query"].(string)
 	if query == "" {
 		return Err("query is required"), nil
@@ -43,20 +52,44 @@ func webSearchExecute(args map[string]interface{}) (interface{}, error) {
 	}
 
 	// Use DuckDuckGo via curl (bypasses Go's broken DNS on Android)
-	results, err := duckDuckGoSearchCurl(query, numResults)
+	results, err := duckDuckGoSearchCurlCtx(ctx, query, numResults)
 	if err != nil {
 		return nil, fmt.Errorf("web search failed: %w", err)
 	}
 
 	return OK(map[string]interface{}{
-		"query":   query,
-		"results": results,
+		"query":              query,
+		"results":            results,
+		"timeout_prediction": predictor.predictionInfo("duckduckgo.com"),
 	}), nil
 }
 
-// curlGet performs an HTTP GET via bash curl (reliable DNS resolution)
+// curlGet performs an HTTP GET via bash curl (reliable DNS resolution).
+// It uses the timeout prediction mechanism: fast DNS+TCP preflight, adaptive
+// per-host --max-time, and outcome recording so slow/dead hosts fail fast.
 func curlGet(targetURL string, headers ...string) (string, error) {
-	args := []string{"-sL", "--connect-timeout", "5", "--max-time", "10", "--max-filesize", "1M", "--speed-limit", "100", "--speed-time", "5"}
+	return curlGetCtx(context.Background(), targetURL, headers...)
+}
+
+// curlGetCtx is the context-aware variant of curlGet. The caller's context can
+// cancel the underlying curl process immediately (exec.CommandContext), so a
+// parent deadline or user interrupt aborts the fetch instead of blocking.
+func curlGetCtx(ctx context.Context, targetURL string, headers ...string) (string, error) {
+	host := hostOf(targetURL)
+
+	// 1) Timeout prediction: preflight DNS + TCP so dead hosts fail in ~1.5s
+	//    instead of hanging until curl's --max-time.
+	if err := predictor.preflightReachable(targetURL, preflightTimeout); err != nil {
+		return "", err
+	}
+
+	// 2) Adaptive timeout budget based on this host's history.
+	maxTime := predictor.adaptiveMaxTime(host)
+	start := time.Now()
+
+	args := []string{"-sL", "--connect-timeout", "3",
+		"--max-time", fmt.Sprintf("%d", int(maxTime.Seconds())),
+		"--max-filesize", "1M", "--speed-limit", "100", "--speed-time", "3"}
 
 	// Add headers
 	for _, h := range headers {
@@ -79,7 +112,8 @@ func curlGet(targetURL string, headers ...string) (string, error) {
 	// as a flag if it starts with a dash (e.g., a malicious or malformed URL).
 	args = append(args, "--", targetURL)
 
-	cmd := exec.Command("curl", args...)
+	// CommandContext kills curl the moment ctx is cancelled.
+	cmd := exec.CommandContext(ctx, "curl", args...)
 	// Limit output to prevent OOM from huge pages
 	stdout := newLimitedBuffer(maxBashOutputBytes)
 	stderr := newLimitedBuffer(maxBashOutputBytes)
@@ -87,12 +121,19 @@ func curlGet(targetURL string, headers ...string) (string, error) {
 	cmd.Stderr = stderr
 
 	err := cmd.Run()
+	elapsed := time.Since(start)
+	predictor.recordResult(host, elapsed, err)
+
 	if err != nil {
+		// Distinguish cancellation from genuine fetch errors.
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("fetch aborted (context cancelled after %v): %w", elapsed.Round(time.Millisecond), ctx.Err())
+		}
 		errStr := strings.TrimSpace(stderr.String())
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("curl failed (exit %d): %s", exitErr.ExitCode(), errStr)
+			return "", fmt.Errorf("curl failed (exit %d) after %v: %s", exitErr.ExitCode(), elapsed.Round(time.Millisecond), errStr)
 		}
-		return "", fmt.Errorf("curl failed: %w", err)
+		return "", fmt.Errorf("curl failed after %v: %w", elapsed.Round(time.Millisecond), err)
 	}
 
 	output := stdout.String()
@@ -104,16 +145,21 @@ func curlGet(targetURL string, headers ...string) (string, error) {
 
 // duckDuckGoSearchCurl performs a search via DuckDuckGo using curl
 func duckDuckGoSearchCurl(query string, numResults int) ([]map[string]string, error) {
+	return duckDuckGoSearchCurlCtx(context.Background(), query, numResults)
+}
+
+// duckDuckGoSearchCurlCtx is the context-aware DuckDuckGo search.
+func duckDuckGoSearchCurlCtx(ctx context.Context, query string, numResults int) ([]map[string]string, error) {
 	searchURL := fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(query))
 
-	body, err := curlGet(searchURL,
+	body, err := curlGetCtx(ctx, searchURL,
 		"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"Accept-Language: en-US,en;q=0.5",
 		"DNT: 1",
 	)
 	if err != nil {
 		// Fallback: try Lite endpoint
-		return duckDuckGoLiteSearchCurl(query, numResults)
+		return duckDuckGoLiteSearchCurlCtx(ctx, query, numResults)
 	}
 
 	// Parse HTML results
@@ -123,14 +169,19 @@ func duckDuckGoSearchCurl(query string, numResults int) ([]map[string]string, er
 	}
 
 	// Fallback to Lite
-	return duckDuckGoLiteSearchCurl(query, numResults)
+	return duckDuckGoLiteSearchCurlCtx(ctx, query, numResults)
 }
 
 // duckDuckGoLiteSearchCurl is a fallback using the Lite endpoint
 func duckDuckGoLiteSearchCurl(query string, numResults int) ([]map[string]string, error) {
+	return duckDuckGoLiteSearchCurlCtx(context.Background(), query, numResults)
+}
+
+// duckDuckGoLiteSearchCurlCtx is the context-aware Lite fallback.
+func duckDuckGoLiteSearchCurlCtx(ctx context.Context, query string, numResults int) ([]map[string]string, error) {
 	searchURL := fmt.Sprintf("https://lite.duckduckgo.com/lite/?q=%s", url.QueryEscape(query))
 
-	body, err := curlGet(searchURL,
+	body, err := curlGetCtx(ctx, searchURL,
 		"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"Accept-Language: en-US,en;q=0.5",
 		"DNT: 1",
@@ -276,6 +327,12 @@ func parseDuckDuckGoLiteHTML(body string, numResults int) ([]map[string]string, 
 
 // webFetchExecute fetches a URL using curl for reliable DNS resolution.
 func webFetchExecute(args map[string]interface{}) (interface{}, error) {
+	return webFetchExecuteCtx(context.Background(), args)
+}
+
+// webFetchExecuteCtx is the context-aware web fetch implementation.
+// It embeds the timeout prediction state so callers can see the decision.
+func webFetchExecuteCtx(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	targetURL, _ := args["url"].(string)
 	if targetURL == "" {
 		return Err("url is required"), nil
@@ -286,7 +343,7 @@ func webFetchExecute(args map[string]interface{}) (interface{}, error) {
 		format = "text"
 	}
 
-	body, err := curlGet(targetURL)
+	body, err := curlGetCtx(ctx, targetURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch failed: %w", err)
 	}
@@ -295,15 +352,17 @@ func webFetchExecute(args map[string]interface{}) (interface{}, error) {
 		var data interface{}
 		if err := json.Unmarshal([]byte(body), &data); err == nil {
 			return OK(map[string]interface{}{
-				"url":     targetURL,
-				"content": data,
+				"url":                targetURL,
+				"content":            data,
+				"timeout_prediction": predictor.predictionInfo(hostOf(targetURL)),
 			}), nil
 		}
 	}
 
 	return OK(map[string]interface{}{
-		"url":     targetURL,
-		"content": body,
+		"url":                targetURL,
+		"content":            body,
+		"timeout_prediction": predictor.predictionInfo(hostOf(targetURL)),
 	}), nil
 }
 

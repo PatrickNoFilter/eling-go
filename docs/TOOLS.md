@@ -60,7 +60,9 @@ Write content to a file (creates directories if needed, overwrites existing).
 | `file_path` | string | ✅ | Path to write |
 | `content` | string | ✅ | Content to write |
 
-**Output:** Success/error confirmation.
+**Auto-backup:** Before overwriting an existing file, ELING snapshots it to `*.bak.<timestamp>` (e.g. `main.go.bak.20260801_120000`). Rotation keeps the last **5** backups per file — old ones are pruned automatically. If `ELING_BACKUP_DIR` is set, backups are mirrored under that central directory (preserving the source path); `ELING_BACKUP_KEEP` overrides the rotation count. Writing identical content is a no-op (no backup created).
+
+**Output:** `{ "path": string, "written": int, "backup": string }` — `written: 0` + `unchanged: true` when the file already had the exact content.
 
 **Example:**
 ```
@@ -80,7 +82,9 @@ Replace exact text in a file (string match, not regex).
 | `old_string` | string | ✅ | Exact text to find |
 | `new_string` | string | ✅ | Replacement text |
 
-**Output:** Success/error confirmation.
+**Auto-backup:** Same as `write` — the original file is snapshotted to `*.bak.<timestamp>` before the edit (rotation keeps the last 5, configurable via `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP`).
+
+**Output:** `{ "edited": bool, "changes": int, "diff": string, "backup": string }`
 
 **Example:**
 ```
@@ -108,7 +112,7 @@ ls(path=/home/user/project)
 ---
 
 ### `grep`
-Search for text patterns in files with regex support.
+Search for text patterns in files with regex support — uses **ugrep 7.5.0**.
 
 **Parameters:**
 | Parameter | Type | Required | Default | Description |
@@ -127,6 +131,12 @@ grep(query=function, type=go)
 grep(query=func.*main, path=./src, regex=true)
 ```
 
+**Notes:**
+- Uses **ugrep** for all searches (`/usr/local/bin/grep` wrapper → ugrep 7.5.0).
+- ugrep powers fuzzy search (`-Z`), compressed archives (`-z`), JSON/CSV output, file-type filters (`-t`), boolean operators (`--bool`), smart case (`-S`), and multi-line matching (`-U`).
+- The tool internally invokes `grep -rn -I -F` (or `-E` for regex) with `-m 5000` per-file cap, excludes `.git`/`node_modules`/`vendor`, and caps total output at 1 MB.
+- 10-second search timeout; exit code 1 (no match) is not an error.
+
 ---
 
 ## 🌐 Web Tools
@@ -140,12 +150,13 @@ Search the web using DuckDuckGo with automatic fallback.
 | `query` | string | ✅ | — | Search query |
 | `num_results` | number | ❌ | 5 | Number of results |
 
-**Output:** `{ "query": string, "results": [{ "title": string, "url": string, "snippet": string }] }`
+**Output:** `{ "query": string, "results": [{ "title": string, "url": string, "snippet": string }], "timeout_prediction": {...} }`
 
 **Implementation:**
 - Primary: DuckDuckGo HTML endpoint
 - Fallback: DuckDuckGo Lite endpoint
 - Uses curl for reliable DNS resolution
+- **Timeout prediction:** fast DNS+TCP preflight probe (dead hosts fail in ~1.5s instead of hanging), plus adaptive `--max-time` per host derived from recorded latency/failure history (v2.1.0)
 
 **Example:**
 ```
@@ -163,12 +174,13 @@ Fetch URL content as text.
 | `url` | string | ✅ | — | URL to fetch |
 | `format` | string | ❌ | `text` | Output format (`text` or `json`) |
 
-**Output:** `{ "url": string, "content": string|object }`
+**Output:** `{ "url": string, "content": string|object, "timeout_prediction": {...} }`
 
 **Limits:**
 - Max response size: 1 MB
-- Connection timeout: 5s
-- Total timeout: 10s
+- Connection timeout: 5s (after preflight)
+- Total timeout: 10s (adaptive per host)
+- Dead/unreachable hosts are rejected by the **preflight probe** in ~1.5s
 
 **Example:**
 ```

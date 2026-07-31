@@ -463,10 +463,64 @@ func RetryBudgetExceeded(err error) bool {
 
 // Message represents a chat message.
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role string `json:"role"`
+	// Content is the visible assistant/user content.
+	Content string `json:"content"`
+	// ReasoningContent carries DeepSeek's reasoning_content field. DeepSeek
+	// REQUIRES this to be passed back on assistant messages from previous
+	// turns when the model runs in thinking mode — omitting it causes a 400
+	// ("The reasoning_content in the thinking mode must be passed back to
+	// the API").
+	//
+	// Note: this field intentionally does NOT use omitempty. DeepSeek's
+	// thinking mode validates that every assistant-role message includes the
+	// reasoning_content key, even when its value is the empty string.
+	// Custom MarshalJSON (below) emits it for assistant messages and omits
+	// it for user/system/tool roles (which must never carry it).
+	ReasoningContent string     `json:"reasoning_content"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
+}
+
+// MarshalJSON implements custom serialization for Message.
+//
+// DeepSeek thinking mode rejects requests where an assistant message lacks
+// the reasoning_content field entirely (HTTP 400: "The reasoning_content in
+// the thinking mode must be passed back to the API"). The default omitempty
+// tag would drop the key whenever ReasoningContent is "" — which happens for
+// synthetic assistant entries (error placeholders, interrupted prompts,
+// auto-test injections, trimmed history). To guarantee the key is always
+// present on assistant messages, we serialize assistant role with an
+// unconditional reasoning_content field, and other roles without it.
+func (m Message) MarshalJSON() ([]byte, error) {
+	if m.Role == "assistant" {
+		aux := struct {
+			Role             string     `json:"role"`
+			Content          string     `json:"content"`
+			ReasoningContent string     `json:"reasoning_content"`
+			ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+			ToolCallID       string     `json:"tool_call_id,omitempty"`
+		}{
+			Role:             m.Role,
+			Content:          m.Content,
+			ReasoningContent: m.ReasoningContent,
+			ToolCalls:        m.ToolCalls,
+			ToolCallID:       m.ToolCallID,
+		}
+		return json.Marshal(aux)
+	}
+	aux := struct {
+		Role       string     `json:"role"`
+		Content    string     `json:"content"`
+		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
+	}{
+		Role:       m.Role,
+		Content:    m.Content,
+		ToolCalls:  m.ToolCalls,
+		ToolCallID: m.ToolCallID,
+	}
+	return json.Marshal(aux)
 }
 
 // ToolCall is a function call requested by the model.
@@ -477,6 +531,22 @@ type ToolCall struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
+}
+
+// NewToolCall creates a ToolCall with the given id, function name and JSON
+// arguments. Useful for synthesizing tool calls (e.g. the internal
+// _auto_test call injected by the agent) so that every "tool" role message
+// has a matching preceding assistant tool_calls entry — OpenAI-compatible
+// APIs reject orphaned tool messages otherwise.
+func NewToolCall(id, name, args string) ToolCall {
+	return ToolCall{
+		ID:   id,
+		Type: "function",
+		Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: name, Arguments: args},
+	}
 }
 
 // ToolDef mirrors the OpenAI-style function tool definition. Kept generic
@@ -717,7 +787,59 @@ func isAuthError(err error) bool {
 // Key rotation: if the request fails with an auth/permission error (401, 403,
 // quota exceeded, etc.), the provider rotates to the next API key in the key
 // ring and retries. This repeats until a key works or all keys are exhausted.
+// sanitizeToolMessages is a final safety net applied to EVERY request,
+// regardless of which caller built the message list. OpenAI-compatible APIs
+// (DeepSeek, OpenAI, etc.) reject any "tool" role message whose tool_call_id
+// was not declared by a preceding assistant message's tool_calls:
+//
+//	"Messages with role 'tool' must be a response to a preceding message
+//	 with 'tool_calls'"
+//
+// This guards every path (agent tool loop, resumed sessions, synthetic
+// injections, provider fallbacks, third-party callers) so a single bad
+// message can never take down the whole request.
+func sanitizeToolMessages(msgs []Message) []Message {
+	// Fast path: nothing to do if there are no tool messages at all.
+	hasTool := false
+	for _, m := range msgs {
+		if m.Role == "tool" {
+			hasTool = true
+			break
+		}
+	}
+	if !hasTool {
+		return msgs
+	}
+
+	declared := make(map[string]bool)
+	out := make([]Message, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role == "assistant" {
+			for _, tc := range m.ToolCalls {
+				if tc.ID != "" {
+					declared[tc.ID] = true
+				}
+			}
+			out = append(out, m)
+			continue
+		}
+		if m.Role == "tool" {
+			// Keep only if its id was declared by a preceding assistant
+			// tool_calls message. Drop orphans (including empty ids).
+			if m.ToolCallID != "" && declared[m.ToolCallID] {
+				out = append(out, m)
+			}
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 func (p *Provider) Chat(ctx context.Context, messages []Message, tools ...ToolDef) (*ChatResponse, error) {
+	// Defensive: never send orphaned tool messages to the API.
+	messages = sanitizeToolMessages(messages)
+
 	// Build the request body once (shared across retries).
 	reqBody := map[string]interface{}{
 		"model":    p.config.Model,
@@ -869,14 +991,20 @@ func (p *Provider) Chat(ctx context.Context, messages []Message, tools ...ToolDe
 }
 
 // ChatStream sends a chat completion request and streams the response.
-// Returns the accumulated text content and any tool calls the model requested.
+// Returns the accumulated text content, the accumulated reasoning content
+// (DeepSeek reasoning_content — returned separately so callers can pass it
+// back on the next request instead of polluting the visible content), and
+// any tool calls the model requested.
 //
 // Retry behaviour: if the stream fails BEFORE any content was received (e.g.
 // initial HTTP error or first chunk never arrived), the method will retry
 // using the configured backoff.  If content has already started streaming,
 // the partial result is returned along with the error rather than retrying
 // (which would produce garbled/duplicate output).
-func (p *Provider) ChatStream(ctx context.Context, messages []Message, onChunk func(string), tools ...ToolDef) (string, []ToolCall, error) {
+func (p *Provider) ChatStream(ctx context.Context, messages []Message, onChunk func(string), tools ...ToolDef) (string, string, []ToolCall, error) {
+	// Defensive: never send orphaned tool messages to the API.
+	messages = sanitizeToolMessages(messages)
+
 	// Build request body once.
 	reqBody := map[string]interface{}{
 		"model":    p.config.Model,
@@ -889,7 +1017,7 @@ func (p *Provider) ChatStream(ctx context.Context, messages []Message, onChunk f
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", nil, fmt.Errorf("marshal request: %w", err)
+		return "", "", nil, fmt.Errorf("marshal request: %w", err)
 	}
 
 	var (
@@ -1081,7 +1209,7 @@ func (p *Provider) ChatStream(ctx context.Context, messages []Message, onChunk f
 		// If we got partial content from a failed stream, return it.
 		if finalContent != "" || len(finalCalls) > 0 {
 			p.stats.recordCall(false, err)
-			return finalContent, finalCalls, err
+			return finalContent, finalReasoning, finalCalls, err
 		}
 		// If we exhausted keys, wrap with a helpful message
 		if p.HasRotated() {
@@ -1092,17 +1220,17 @@ func (p *Provider) ChatStream(ctx context.Context, messages []Message, onChunk f
 			}
 		}
 		p.stats.recordCall(false, err)
-		return "", nil, err
+		return "", "", nil, err
 	}
 	p.stats.recordCall(true, nil)
 	if retried {
 		p.stats.recordRetrySuccess()
 	}
-	// Prepend reasoning to the final content so streaming callers see it
-	if finalReasoning != "" {
-		finalContent = "🧠 [Reasoning: " + finalReasoning + "]\n\n" + finalContent
-	}
-	return finalContent, finalCalls, nil
+	// Return reasoning separately (NOT prepended into content) so callers can
+	// pass it back as reasoning_content on the next request. Prepending it to
+	// content would (a) pollute the visible answer and (b) still fail
+	// DeepSeek's thinking-mode validation on subsequent turns.
+	return finalContent, finalReasoning, finalCalls, nil
 }
 
 // friendlyDuration formats a duration in a human-friendly way.

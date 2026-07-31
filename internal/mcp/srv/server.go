@@ -504,7 +504,7 @@ func (s *Server) registerTools() {
 
 	s.tools["grep"] = ToolDefinition{
 		Name:        "grep",
-		Description: "Search for text patterns in files using ugrep",
+		Description: "Search for text patterns in files using grep",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1148,7 +1148,7 @@ func (s *Server) execGrep(ctx context.Context, args map[string]interface{}) (str
 }
 
 func (s *Server) execWebSearch(ctx context.Context, args map[string]interface{}) (string, error) {
-	result, err := tools.DefaultRegistry.Execute("web_search", args)
+	result, err := tools.DefaultRegistry.ExecuteContext(ctx, "web_search", args)
 	if err != nil {
 		return "", err
 	}
@@ -1156,7 +1156,7 @@ func (s *Server) execWebSearch(ctx context.Context, args map[string]interface{})
 }
 
 func (s *Server) execWebFetch(ctx context.Context, args map[string]interface{}) (string, error) {
-	result, err := tools.DefaultRegistry.Execute("web_fetch", args)
+	result, err := tools.DefaultRegistry.ExecuteContext(ctx, "web_fetch", args)
 	if err != nil {
 		return "", err
 	}
@@ -1169,7 +1169,7 @@ func (s *Server) execMarkdownifyURL(ctx context.Context, args map[string]interfa
 	url := getStrArg(args, "url")
 	// Use web_fetch + external conversion
 	fetchArgs := map[string]interface{}{"url": url}
-	fetchResult, err := tools.DefaultRegistry.Execute("web_fetch", fetchArgs)
+	fetchResult, err := tools.DefaultRegistry.ExecuteContext(ctx, "web_fetch", fetchArgs)
 	if err != nil {
 		return "", fmt.Errorf("cannot fetch URL: %w", err)
 	}

@@ -39,7 +39,8 @@ eling/
 │   │   ├── memory.go          # Memory system (short/long term, FactsLayer decay)
 │   │   └── memory_test.go     # Memory unit tests
 │   ├── cli/                   # CLI subcommand handling
-│   │   └── cli.go             # Subcommand dispatch
+│   │   ├── cli.go             # Subcommand dispatch
+│   │   └── setup.go           # Built-in setup wizard (--add-provider, --test, delegation)
 │   ├── config/                # Configuration management
 │   │   └── config.go          # YAML loading, saving, defaults
 │   ├── layers/                # 🧠 8-Layer Memory Architecture (RRF fusion)
@@ -77,20 +78,27 @@ eling/
 │   ├── tools/                 # Dynamic tool system (thread-safe registry)
 │   │   ├── registry.go        # Category-aware tool registry
 │   │   ├── bash.go            # Shell execution tool
-│   │   ├── files.go           # File read/write/edit/grep/ls
-│   │   ├── web.go             # Web search/fetch tools
+│   │   ├── files.go           # File read/write/edit/grep/ls (+ auto-backup before write/edit)
+│   │   ├── web.go             # Web search/fetch tools (v2.1.0, timeout prediction)
+│   │   ├── web_timeout.go     # fetchPredictor: preflight probe + adaptive max-time
 │   │   ├── register.go        # Dynamic tool/skill registration
 │   │   ├── backup.go          # Backup & intelligence tools
 │   │   ├── schema.go          # JSON parameter schemas
 │   │   ├── semantic.go        # Semantic search (BrainQuery + local trigram)
 │   │   ├── setup.go           # Config management tool
 │   │   ├── ocr.go             # Open Code Review tools
+│   │   ├── files_backup_test.go # Auto-backup rotation tests
+│   │   ├── web_timeout_test.go  # Timeout predictor tests
 │   │   └── register_test.go   # Registration tests
 │   └── tui/                   # Terminal UI
-│       └── tui.go             # Bubbletea 3-panel TUI
+│       ├── tui.go             # Bubbletea 3-panel TUI (marquee banner, paste-safe input)
+│       └── paste_test.go      # Paste-burst detection tests
 ├── docs/                      # Documentation (ARCHITECTURE.md, API.md, DEVELOPMENT.md, TOOLS.md, etc.)
 ├── skills/                    # Community skill scripts (hermes)
-└── scripts/                   # Utility scripts (install-hermes-skills.sh, agent-integration/)
+├── scripts/                   # Utility scripts (install-hermes-skills.sh, agent-integration/)
+├── rebuild.sh                 # Atomic rebuild (mv not cp — safe on overlayfs/proot)
+├── start.sh                   # Launcher with OS signal trapping
+└── kill-eling.sh              # Graceful shutdown helper
 ```
 
 ---

@@ -25,6 +25,7 @@ Welcome to the ELING documentation. ELING is an auto-learning evolving AI agent 
 - Auto-save every 5 minutes
 - Graceful shutdown on SIGTERM
 - Crash recovery on restart
+- `write`/`edit` auto-backups (`*.bak.<timestamp>`, rotation keeps 5)
 
 ### 🔌 MCP Integration
 - Full Model Context Protocol support
@@ -37,19 +38,26 @@ Welcome to the ELING documentation. ELING is an auto-learning evolving AI agent 
 - `ocr_scan` — Full-file scan
 - `ocr_health` — Check status
 
+### 🛠 Tooling Highlights
+- **ugrep 7.5.0** search engine (fuzzy, archives, JSON/CSV, `--bool`)
+- **Paste-safe TUI** — multi-line pastes held until deliberate `Enter`
+- **Scrolling marquee banner** in the TUI header
+- **Web timeout prediction** — preflight probe + adaptive max-time per host
+- **DeepSeek reasoning_content persistence** for thinking-mode models
+
 ---
 
 ## Quick Links
 
 | What | Where |
 |------|-------|
-| Build & Run | `go build -o eling . && ./eling` |
+| Build & Run | `go build -o eling . && ./eling` (or `./rebuild.sh` for atomic replace) |
 | Run Tests | `go test ./...` |
 | Config File | `~/.eling/config.yaml` |
 | Log File | `~/.eling/eling.log` |
 | Crash Reports | `~/.eling/crash_report.log` |
 | Sessions | `~/.eling/sessions/` |
-| Setup Wizard | `./eling-wizard.sh` |
+| Setup Wizard | `./eling setup` (= `./eling-wizard.sh`) |
 | Non-Interactive | `./eling --run "your query"` |
 
 ---

@@ -3,6 +3,11 @@
 # Wraps the ELING binary with OS-level signal trapping for SIGBUS/SIGSEGV.
 # When the Go binary crashes with a fatal signal, the shell wrapper detects
 # the exit code and writes an additional crash marker.
+#
+# IMPORTANT for overlayfs/proot environments (Termux, PRoot, Docker overlay):
+#   - Use rebuild.sh (or mv) to update the binary — NEVER use cp.
+#   - cp truncates the running file's inode, causing SIGBUS (exit code 135).
+#   - mv atomically swaps the inode, keeping the running process unaffected.
 
 cd "$(dirname "$0")"
 
@@ -52,10 +57,20 @@ if [ $EXIT_CODE -gt 128 ]; then
     echo "Signal: $SIGNAL_NAME (signal $SIGNAL_NUM)" >> "$CRASH_LOG"
     echo "PID: $$" >> "$CRASH_LOG"
     echo "This is a fatal OS signal caught by the shell wrapper." >> "$CRASH_LOG"
+    # Add overlayfs-specific guidance for SIGBUS
+    if [ "$SIGNAL_NUM" = "7" ]; then
+        echo "" >> "$CRASH_LOG"
+        echo "If you used 'cp' to replace the eling binary, this is the cause." >> "$CRASH_LOG"
+        echo "On overlayfs/proot, cp truncates the running inode → SIGBUS." >> "$CRASH_LOG"
+        echo "Use './rebuild.sh' or 'mv' instead of 'cp' to update eling." >> "$CRASH_LOG"
+    fi
     echo "=== END CRASH REPORT ===" >> "$CRASH_LOG"
     echo "" >> "$CRASH_LOG"
     echo "🚨 ELING CRASHED: $SIGNAL_NAME (signal $SIGNAL_NUM) — caught by shell wrapper" >&2
     echo "   Crash report: $CRASH_LOG" >&2
+    if [ "$SIGNAL_NUM" = "7" ]; then
+        echo "   💡 SIGBUS on overlayfs: use rebuild.sh or mv, not cp, to update eling" >&2
+    fi
 fi
 
 exit $EXIT_CODE

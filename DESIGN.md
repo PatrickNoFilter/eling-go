@@ -6,11 +6,13 @@
 ┌──────────────────────────────────────────────────────────┐
 │                    TUI (Bubbletea 3-Panel)               │
 │  ┌──────────────────────────────────────────────────┐    │
+│  │  MARQUEE: ✦ ELING — Auto-Learning… (scrolling)   │    │
 │  │  HEADER: Model | Session | Tokens | Mem% | MCP   │    │
 │  ├──────────────────────────────────────────────────┤    │
 │  │  BODY: Scrollable conversation log + tool output │    │
 │  ├──────────────────────────────────────────────────┤    │
 │  │  INPUT: > text entry · tool(args) · /command    │    │
+│  │         (paste-safe: multi-line held until Enter)│    │
 │  └──────────────────────────────────────────────────┘    │
 └──────────────────────┬───────────────────────────────────┘
                        │
@@ -38,17 +40,21 @@
 ### 1. CLI Layer (main.go)
 - Flag parsing, config loading, signal handling, PID management
 - Crash detection / graceful shutdown / auto-save
+- `eling setup` subcommand — built-in wizard (delegates to `eling-wizard.sh`; extended flags `--add-provider`, `--test`, `--dedupe` handled by `internal/cli/setup.go`)
 
 ### 2. TUI Layer (Bubbletea)
-- **Header**: Status bar, model info, memory usage, MCP status
-- **Body**: Scrollable viewport for conversation history and tool output
-- **Input**: Bottom text entry with command handling
+- **Marquee banner**: Pink animated ticker (`✦ ELING — Auto-Learning Evolving AI Agent ✦`) scrolls continuously above the header
+- **Header**: Status bar, model info, memory usage, MCP status (recolored light blue for Catppuccin)
+- **Body**: Scrollable viewport for conversation history and tool output (generation-counter guard discards stale messages from old query goroutines)
+- **Input**: Bottom text entry with command handling — **paste-safe** (bracketed-paste + burst detection hold newlines; a paste never auto-sends, `Enter` submits deliberately)
 
 ### 3. Agent Core (internal/agent/)
 - Auto-learning: `autoLearn()` uses LLM to extract reusable skills from every exchange
 - Evolving: Agent can register new tools and skills at runtime
 - Self-reflection: Periodic conversation summarization for long context
 - Turn timeout prediction: Self-adaptive based on history
+- Skill lifecycle: Skills track `UsedCount`; the 100-skill cap evicts **least-used** (not oldest); auto-learned skills persist to `tools.json` and re-register into the Tool Registry on restart
+- Reasoning persistence: DeepSeek `reasoning_content` stored per round and passed back on tool-loop follow-ups and session resume
 
 ### 4. Provider (internal/provider/)
 - Multi-provider LLM client (DeepSeek, OpenAI, Groq, any OpenAI-compatible)
@@ -69,6 +75,14 @@
 - Panic-safe execution with bounded output limits (512 KiB bash output, 256 KiB tool results)
 - Skills stored as tools with `category:"skill"` in ToolRegistry — no separate SkillManager
 - `ListSkills()` returns `[]tools.Tool` directly from registry
+- Search via **ugrep 7.5.0** (all `grep` calls — fuzzy `-Z`, archives `-z`, JSON/CSV, `--bool`, smart case `-S`)
+- **Auto-backup before mutation**: every `write`/`edit` snapshots the file to `*.bak.<timestamp>` (rotation keeps 5; `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP` configurable)
+- **Web timeout prediction** (`internal/tools/web_timeout.go`): fast DNS+TCP preflight probe (dead hosts fail in ~1.5s) + adaptive curl `--max-time` per host from recorded latency/failure history
+
+### 6b. Setup Wizard (`eling setup` → `eling-wizard.sh` / `eling-setup`)
+- Same interactive flow from `./eling setup`, `./eling-wizard.sh`, or `./eling-setup` (delegates to the wizard script when found)
+- Provider menu includes: opencode-zen, opencode-zen-free, deepseek-direct, openai, groq, tokenrouter, custom
+- Extended flags beyond the wizard: `--add-provider` (add without touching current config), `--test` (live connection check), `--dedupe` (removes exact-duplicate providers: same model + base_url + api_key)
 
 ### 7. MCP Client (internal/mcp/)
 - Connect to external Model Context Protocol servers
@@ -103,3 +117,10 @@ Adapted from [PatrickNoFilter/eling](https://github.com/PatrickNoFilter/eling) (
 - `github.com/mark3labs/mcp-go` — MCP protocol
 - `modernc.org/sqlite` — Pure-Go SQLite for Brain layers
 - `gopkg.in/yaml.v3` — Configuration
+- `ugrep` 7.5.0 — Search engine powering all `grep` tool calls (fuzzy, archives, JSON/CSV, `--bool`)
+
+## Reliability Tooling
+- **`rebuild.sh`** — atomic rebuild (builds to temp, then `mv` — never `cp`, which truncates the running inode on overlayfs/proot and causes SIGBUS)
+- **`start.sh`** — launcher trapping fatal OS signals (SIGBUS/SIGSEGV/SIGABRT/SIGILL/SIGFPE) and writing crash reports with overlayfs guidance
+- **`kill-eling.sh`** — graceful shutdown helper (SIGTERM, never SIGKILL)
+- **Auto-backup** — every `write`/`edit` snapshots the original file before mutation (`*.bak.<timestamp>`, rotation keeps 5)

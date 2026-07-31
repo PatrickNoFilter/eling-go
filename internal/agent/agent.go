@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -115,6 +116,12 @@ type Agent struct {
 	// on success, read by Ask() after the tool loop completes.
 	lastToolRoundCount atomic.Int64
 	lastToolCallCount  atomic.Int64
+
+	// lastReasoning stores the most recent model reasoning_content (e.g.
+	// DeepSeek thinking mode). Persisted with the assistant session entry so
+	// resumed conversations can pass reasoning_content back to the API —
+	// DeepSeek rejects assistant messages that omit it in thinking mode.
+	lastReasoning atomic.Value // string
 }
 
 // New creates a new Agent with all subsystems initialized.
@@ -397,7 +404,7 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 				"source":  "user_prompt",
 			})
 
-			_ = a.Sessions.Append(a.sessionName, "assistant", finalContent)
+			_ = a.Sessions.AppendWithReasoning(a.sessionName, "assistant", finalContent, a.lastReasoningString())
 			if s != nil && len(s.Entries) > 0 {
 				s.Entries[len(s.Entries)-1].Tokens = totalTokens / 2
 			}
@@ -424,7 +431,7 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 
 		lastErr = err
 		// Check if this is a timeout error
-		if !strings.Contains(err.Error(), "turn timed out after") {
+		if !isTurnTimeout(err) {
 			// Non-timeout error — record but don't retry
 			a.recordTurnDuration(TurnTimeoutRecord{
 				PromptLength:   len(prompt),
@@ -475,6 +482,18 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 	}
 
 	return "", lastErr
+}
+
+// lastReasoningString returns the most recently stored reasoning_content, or
+// "" if none was recorded. Used when persisting assistant session entries so
+// resumed conversations can pass reasoning_content back to DeepSeek.
+func (a *Agent) lastReasoningString() string {
+	if v := a.lastReasoning.Load(); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // runToolLoop drives the provider through successive tool-call rounds until
@@ -563,6 +582,9 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 		resp := chatResp
 
 		// Emit reasoning content from the model's response (e.g. DeepSeek reasoning_content)
+		// Always store (even when empty) so stale reasoning from an earlier
+		// round never leaks into the final session save.
+		a.lastReasoning.Store(resp.Reasoning)
 		if resp.Reasoning != "" {
 			for _, cb := range onToolCall {
 				cb(ToolCallEvent{
@@ -591,11 +613,13 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 		}
 
 		// Record the assistant's tool-call turn, then execute each tool
-		// and feed the results back as "tool" messages.
+		// and feed the results back as "tool" messages. ReasoningContent is
+		// included so DeepSeek thinking mode accepts the follow-up request.
 		messages = append(messages, provider.Message{
-			Role:      "assistant",
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
+			Role:             "assistant",
+			Content:          resp.Content,
+			ReasoningContent: resp.Reasoning,
+			ToolCalls:        resp.ToolCalls,
 		})
 
 		for _, tc := range resp.ToolCalls {
@@ -686,6 +710,15 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 		if a.cfg.Agent.AutoTest {
 			testFail := a.autoTest(messages)
 			if testFail != "" {
+				// Append a synthetic assistant tool_call BEFORE the tool
+				// result so the message sequence stays valid. OpenAI-compatible
+				// APIs reject a "tool" message that doesn't follow an
+				// assistant message declaring the same tool_call_id.
+				messages = append(messages, provider.Message{
+					Role:      "assistant",
+					Content:   "",
+					ToolCalls: []provider.ToolCall{provider.NewToolCall("_auto_test", "_auto_test", "{}")},
+				})
 				messages = append(messages, provider.Message{
 					Role:       "tool",
 					Content:    testFail,
@@ -710,6 +743,11 @@ func (a *Agent) chatWithRetry(ctx context.Context, prov *provider.Provider, mess
 	const maxOuterRetries = provider.DefaultOuterRetries
 	var lastErr error
 	var triedProviders []string
+
+	// Defensive: strip orphaned tool messages before sending. OpenAI-compatible
+	// APIs reject "tool" messages that don't follow an assistant tool_calls
+	// message, so we drop any that slipped through (trimming, fallback, etc.).
+	messages = sanitizeToolMessages(messages)
 
 	// Collect all available providers for fallback
 	allProviders := a.getProvidersForFallback(prov)
@@ -800,10 +838,16 @@ func (a *Agent) chatWithRetry(ctx context.Context, prov *provider.Provider, mess
 // automatic provider fallback if the current provider is unavailable.
 // If content has already started streaming, the error is returned as-is
 // (the provider already handles partial-stream retry correctly).
-func (a *Agent) chatStreamWithRetry(ctx context.Context, prov *provider.Provider, messages []provider.Message, onChunk func(string), pToolDefs []provider.ToolDef, onToolCall ...func(ToolCallEvent)) (string, []provider.ToolCall, error) {
+// Returns (content, reasoning, toolCalls, err) — reasoning is the DeepSeek
+// reasoning_content accumulated during the stream.
+func (a *Agent) chatStreamWithRetry(ctx context.Context, prov *provider.Provider, messages []provider.Message, onChunk func(string), pToolDefs []provider.ToolDef, onToolCall ...func(ToolCallEvent)) (string, string, []provider.ToolCall, error) {
 	const maxOuterRetries = provider.DefaultOuterRetries
 	var lastErr error
 	var triedProviders []string
+
+	// Defensive: strip orphaned tool messages before sending (same rationale
+	// as chatWithRetry — a lone tool message breaks the whole request).
+	messages = sanitizeToolMessages(messages)
 
 	// Collect all available providers for fallback
 	allProviders := a.getProvidersForFallback(prov)
@@ -822,7 +866,7 @@ func (a *Agent) chatStreamWithRetry(ctx context.Context, prov *provider.Provider
 			}
 			select {
 			case <-ctx.Done():
-				return "", nil, fmt.Errorf("stream retry aborted during fallback: %w", ctx.Err())
+				return "", "", nil, fmt.Errorf("stream retry aborted during fallback: %w", ctx.Err())
 			case <-time.After(500 * time.Millisecond):
 			}
 		}
@@ -835,7 +879,7 @@ func (a *Agent) chatStreamWithRetry(ctx context.Context, prov *provider.Provider
 				delay := baseDelay + jitter
 				select {
 				case <-ctx.Done():
-					return "", nil, fmt.Errorf("agent-level stream retry aborted: %w", ctx.Err())
+					return "", "", nil, fmt.Errorf("agent-level stream retry aborted: %w", ctx.Err())
 				case <-time.After(delay):
 				}
 				for _, cb := range onToolCall {
@@ -843,19 +887,19 @@ func (a *Agent) chatStreamWithRetry(ctx context.Context, prov *provider.Provider
 				}
 			}
 
-			content, toolCalls, err := currentProv.ChatStream(ctx, messages, onChunk, pToolDefs...)
+			content, reasoning, toolCalls, err := currentProv.ChatStream(ctx, messages, onChunk, pToolDefs...)
 			if err == nil {
-				return content, toolCalls, nil
+				return content, reasoning, toolCalls, nil
 			}
 			lastErr = err
 
 			// If we got partial content, don't retry on this provider — return what we have
 			if content != "" || len(toolCalls) > 0 {
-				return content, toolCalls, err
+				return content, reasoning, toolCalls, err
 			}
 
 			if !provider.IsRetryable(err) {
-				return "", nil, err // already human-friendly from formatAPIError
+				return "", "", nil, err // already human-friendly from formatAPIError
 			}
 
 			// Exhausted retries on this provider — try next one
@@ -868,19 +912,19 @@ func (a *Agent) chatStreamWithRetry(ctx context.Context, prov *provider.Provider
 
 		select {
 		case <-ctx.Done():
-			return "", nil, fmt.Errorf("stream retry aborted after fallback: %w", ctx.Err())
+			return "", "", nil, fmt.Errorf("stream retry aborted after fallback: %w", ctx.Err())
 		default:
 		}
 	}
 
 	if len(triedProviders) > 1 {
-		return "", nil, fmt.Errorf("⚠️ All %d providers unavailable after retries (%s). Last error: %w",
+		return "", "", nil, fmt.Errorf("⚠️ All %d providers unavailable after retries (%s). Last error: %w",
 			len(triedProviders), strings.Join(triedProviders, ", "), lastErr)
 	}
 	if provider.RetryBudgetExceeded(lastErr) {
-		return "", nil, fmt.Errorf("⚠️ Provider %q temporarily unavailable — the service didn't respond after several retries. Check your connection or try again later.", triedProviders[0])
+		return "", "", nil, fmt.Errorf("⚠️ Provider %q temporarily unavailable — the service didn't respond after several retries. Check your connection or try again later.", triedProviders[0])
 	}
-	return "", nil, fmt.Errorf("⚠️ %w", lastErr)
+	return "", "", nil, fmt.Errorf("⚠️ %w", lastErr)
 }
 
 // trimToolLoopMessages keeps only the system message (first) and the last n
@@ -926,6 +970,55 @@ func trimToolLoopMessages(msgs []provider.Message, keepLast int) []provider.Mess
 	result = append(result, system)
 	result = append(result, adjusted...)
 	return result
+}
+
+// sanitizeToolMessages is a defensive safety net that removes any "tool"
+// role messages whose tool_call_id was NOT declared by a preceding assistant
+// message's tool_calls. OpenAI-compatible APIs (DeepSeek, OpenAI, etc.)
+// reject requests containing orphaned tool messages with:
+//
+//	"Messages with role 'tool' must be a response to a preceding message
+//	 with 'tool_calls'"
+//
+// This guards against every path that could produce an orphan (trimming edge
+// cases, resumed sessions, synthetic injections, provider fallbacks) so a
+// single bad message can never take down the whole request.
+func sanitizeToolMessages(msgs []provider.Message) []provider.Message {
+	// Fast path: nothing to do if there are no tool messages at all.
+	hasTool := false
+	for _, m := range msgs {
+		if m.Role == "tool" {
+			hasTool = true
+			break
+		}
+	}
+	if !hasTool {
+		return msgs
+	}
+
+	declared := make(map[string]bool)
+	out := make([]provider.Message, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role == "assistant" {
+			for _, tc := range m.ToolCalls {
+				if tc.ID != "" {
+					declared[tc.ID] = true
+				}
+			}
+			out = append(out, m)
+			continue
+		}
+		if m.Role == "tool" {
+			// Keep only if its id was declared by a preceding assistant
+			// tool_calls message. Drop orphans (including empty ids).
+			if m.ToolCallID != "" && declared[m.ToolCallID] {
+				out = append(out, m)
+			}
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // AskStream sends a prompt and streams the response, executing any tool
@@ -1018,7 +1111,7 @@ func (a *Agent) AskStream(ctx context.Context, prompt string, onChunk func(strin
 			if s != nil && len(s.Entries) > 0 {
 				s.Entries[len(s.Entries)-1].Tokens = estimateSessionEntryTokens(s.Entries[len(s.Entries)-1])
 			}
-			_ = a.Sessions.Append(a.sessionName, "assistant", fullResponse)
+			_ = a.Sessions.AppendWithReasoning(a.sessionName, "assistant", fullResponse, a.lastReasoningString())
 			if s != nil && len(s.Entries) > 0 {
 				s.Entries[len(s.Entries)-1].Tokens = totalTokens / 2
 			}
@@ -1037,7 +1130,7 @@ func (a *Agent) AskStream(ctx context.Context, prompt string, onChunk func(strin
 		}
 
 		lastErr = err
-		if !strings.Contains(err.Error(), "turn timed out after") {
+		if !isTurnTimeout(err) {
 			a.recordTurnDuration(TurnTimeoutRecord{
 				PromptLength:   len(prompt),
 				ActualDuration: time.Since(startTime),
@@ -1146,17 +1239,27 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 				cb(ToolCallEvent{IsThinking: true})
 			}
 		}
-		content, toolCalls, err := a.chatStreamWithRetry(toolCtx, prov, messages, onChunk, pToolDefs, onToolCall...)
+		content, reasoning, toolCalls, err := a.chatStreamWithRetry(toolCtx, prov, messages, onChunk, pToolDefs, onToolCall...)
 		if err != nil {
 			// Preserve partial content/tool calls instead of discarding them.
-			// chatStreamWithRetry returns (content, toolCalls, err) when the
-			// stream got partial results before the error — content was already
-			// streamed to the UI via onChunk callbacks.
+			// chatStreamWithRetry returns (content, reasoning, toolCalls, err)
+			// when the stream got partial results before the error — content
+			// was already streamed to the UI via onChunk callbacks.
 			if content != "" || len(toolCalls) > 0 {
 				partialResponse = content
 				return content, totalTokens, err
 			}
 			return "", totalTokens, err
+		}
+
+		// Emit thinking event for DeepSeek reasoning_content (streaming path).
+		// Always store (even when empty) so stale reasoning from an earlier
+		// round never leaks into the final session save.
+		a.lastReasoning.Store(reasoning)
+		if reasoning != "" {
+			for _, cb := range onToolCall {
+				cb(ToolCallEvent{Reasoning: reasoning, IsThinking: true})
+			}
 		}
 
 		// ChatStream doesn't return token counts, so estimate from content
@@ -1176,10 +1279,13 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 			break
 		}
 
+		// ReasoningContent is included so DeepSeek thinking mode accepts the
+		// follow-up request with this assistant turn in the history.
 		messages = append(messages, provider.Message{
-			Role:      "assistant",
-			Content:   content,
-			ToolCalls: toolCalls,
+			Role:             "assistant",
+			Content:          content,
+			ReasoningContent: reasoning,
+			ToolCalls:        toolCalls,
 		})
 
 		for _, tc := range toolCalls {
@@ -1269,6 +1375,13 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 		if a.cfg.Agent.AutoTest {
 			testFail := a.autoTest(messages)
 			if testFail != "" {
+				// Synthetic assistant tool_call before the tool result —
+				// keeps the message sequence valid for OpenAI-compatible APIs.
+				messages = append(messages, provider.Message{
+					Role:      "assistant",
+					Content:   "",
+					ToolCalls: []provider.ToolCall{provider.NewToolCall("_auto_test", "_auto_test", "{}")},
+				})
 				messages = append(messages, provider.Message{
 					Role:       "tool",
 					Content:    testFail,
@@ -1329,6 +1442,22 @@ func (a *Agent) getProviderName(p *provider.Provider) string {
 }
 
 // recordTurnDuration stores a turn timeout record for future prediction.
+// isTurnTimeout reports whether err indicates the turn's wall-clock deadline
+// expired. This covers both the explicit "turn timed out after" error from
+// runToolLoop and context deadline exceeded errors surfaced from the
+// retry/backoff layer (e.g. "agent-level retry aborted: context deadline
+// exceeded"). Callers use this to decide whether to retry the turn with a
+// longer timeout (self-adaptive) rather than treating it as a hard failure.
+func isTurnTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.Contains(err.Error(), "turn timed out after") {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded)
+}
+
 func (a *Agent) recordTurnDuration(rec TurnTimeoutRecord) {
 	a.turnTimeoutMu.Lock()
 	defer a.turnTimeoutMu.Unlock()
@@ -1712,6 +1841,21 @@ func (a *Agent) LoadState() error {
 		a.conversationSummary = strings.TrimSpace(string(summaryData))
 	}
 
+	// Load turn timeout history (for self-adaptive timeout prediction).
+	// Without this, estimateTurnDuration() returns 0 after every restart
+	// ("timeout prediction mechanism not initialized") and turns fall back
+	// to the default fixed timeout until enough new turns have been recorded.
+	a.turnTimeoutMu.Lock()
+	histData, err := os.ReadFile(filepath.Join(a.stateDir, "turn_timeout_history.json"))
+	if err == nil {
+		var hist []TurnTimeoutRecord
+		if err := json.Unmarshal(histData, &hist); err == nil && len(hist) > 0 {
+			a.turnTimeoutHist = hist
+			log.Printf("Loaded %d turn timeout history record(s) for adaptive timeout prediction", len(hist))
+		}
+	}
+	a.turnTimeoutMu.Unlock()
+
 	// Load dynamic tools and re-register them
 	toolData, err := os.ReadFile(filepath.Join(a.stateDir, "tools.json"))
 	if err == nil {
@@ -1799,9 +1943,24 @@ func safeMarshalJSON(v interface{}) []byte {
 }
 
 // SaveState saves agent state to disk.
+// Uses a timeout-based lock to prevent deadlock: if the write lock is held
+// by another goroutine (e.g., during a panic while holding a.mu.Lock()),
+// this will time out after 3 seconds and return an error rather than
+// blocking forever. This is critical for safeSaveState recovery.
 func (a *Agent) SaveState() error {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	// Try to acquire read lock with a 3-second timeout to prevent deadlock
+	// if another goroutine holds the write lock during panic recovery.
+	lockCh := make(chan struct{}, 1)
+	go func() {
+		a.mu.RLock()
+		close(lockCh)
+	}()
+	select {
+	case <-lockCh:
+		defer a.mu.RUnlock()
+	case <-time.After(3 * time.Second):
+		return fmt.Errorf("save state: could not acquire read lock within 3 seconds (possible deadlock)")
+	}
 
 	if err := os.MkdirAll(a.stateDir, 0755); err != nil {
 		return err
@@ -1821,15 +1980,19 @@ func (a *Agent) SaveState() error {
 		}
 	}
 
-	// Save skills
-	if skillData := safeMarshalJSON(a.skills); skillData != nil {
+	// Save skills — deep-copy under lock to prevent data race with autoLearn()
+	skillsCopy := make([]LearnedSkill, len(a.skills))
+	copy(skillsCopy, a.skills)
+	if skillData := safeMarshalJSON(skillsCopy); skillData != nil {
 		if err := os.WriteFile(filepath.Join(a.stateDir, "skills.json"), skillData, 0644); err != nil {
 			return err
 		}
 	}
 
-	// Save evolutions
-	if evData := safeMarshalJSON(a.evolutions); evData != nil {
+	// Save evolutions — deep-copy under lock
+	evolutionsCopy := make([]Evolution, len(a.evolutions))
+	copy(evolutionsCopy, a.evolutions)
+	if evData := safeMarshalJSON(evolutionsCopy); evData != nil {
 		if err := os.WriteFile(filepath.Join(a.stateDir, "evolutions.json"), evData, 0644); err != nil {
 			return err
 		}
@@ -2015,11 +2178,14 @@ Always be helpful, precise, and proactive. Think step by step.`
 			entriesKept++
 		}
 
-		// Append in chronological order (oldest kept first)
+		// Append in chronological order (oldest kept first). Reasoning is
+		// replayed as reasoning_content so DeepSeek thinking mode accepts
+		// resumed conversations.
 		for i := len(keepEntries) - 1; i >= 0; i-- {
 			messages = append(messages, provider.Message{
-				Role:    keepEntries[i].Role,
-				Content: keepEntries[i].Content,
+				Role:             keepEntries[i].Role,
+				Content:          keepEntries[i].Content,
+				ReasoningContent: keepEntries[i].Reasoning,
 			})
 		}
 
@@ -2044,14 +2210,9 @@ Always be helpful, precise, and proactive. Think step by step.`
 func (a *Agent) updateConversationSummary() {
 	a.mu.RLock()
 	summary := a.conversationSummary
-	s, ok := a.Sessions.Get(a.sessionName)
-	// ⚠️ Snapshot entries under lock to avoid data race with concurrent
-	// Ask/AskStream which modify session entries while holding a.mu.
-	var entries []session.Entry
-	if ok && s != nil {
-		entries = make([]session.Entry, len(s.Entries))
-		copy(entries, s.Entries)
-	}
+	// Use GetEntriesCopy which safely copies entries under the session
+	// manager's own lock, avoiding data races with concurrent Append() calls.
+	entries, _ := a.Sessions.GetEntriesCopy(a.sessionName)
 	a.mu.RUnlock()
 
 	if len(entries) < 6 {
@@ -2180,7 +2341,7 @@ func (a *Agent) generateLLMSummary(entries []session.Entry, sampleEnd int) {
 	sb.WriteString("---\nRespond with a concise summary (3-5 sentences) covering the key points above.")
 	summaryPrompt := sb.String()
 
-	// Get the provider
+	// Get the provider — hold lock through the full provider access
 	a.mu.RLock()
 	prov := a.providers.GetDefault()
 	a.mu.RUnlock()
@@ -2467,7 +2628,9 @@ func (a *Agent) autoTest(results []provider.Message) string {
 
 	// Run go test with short mode and verbose only on failures
 	args := append([]string{"test", "-short", "-count=1"}, targets...)
-	cmd := exec.Command("go", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", args...)
 	output, err := cmd.CombinedOutput()
 
 	if err == nil {

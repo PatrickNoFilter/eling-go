@@ -14,6 +14,7 @@ eling.bak.*
 # Backup archives
 *.zip
 *.bak
+*.bak.*
 *.tar.gz
 *.tar
 backups/

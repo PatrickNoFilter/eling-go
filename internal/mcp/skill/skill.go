@@ -58,7 +58,7 @@ func DefaultMCPSkillConfig() MCPSkillConfig {
 	}
 	return MCPSkillConfig{
 		Name:      "eling-brains",
-		Version:   "0.1.0",
+		Version:   "0.2.2",
 		StateDir:  stateDir,
 		VaultPath: "",
 		AgentID:   "eling-mcp",

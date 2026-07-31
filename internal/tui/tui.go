@@ -21,10 +21,19 @@ import (
 const (
 	initInputHeight = 1
 	maxInputHeight  = 8
+
+	// Paste-burst detection. When key events arrive closer together than
+	// pasteBurstWindow they are treated as a paste burst. While a paste is
+	// active, Enter inserts a newline into the input buffer instead of
+	// submitting, so pasted multi-line text is held for review and only sent
+	// when the user deliberately presses Enter after the burst has settled.
+	pasteBurstWindow = 60 * time.Millisecond  // max gap between keys to count as one burst
+	pasteMinBurst    = 2                      // keys in a row that fast => paste in progress
+	pasteGrace       = 350 * time.Millisecond // paste mode persists this long after the last burst key
 )
 
 var (
-	hdrSty       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1"))
+	hdrSty       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89B4FA"))
 	dimSty       = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086"))
 	errSty       = lipgloss.NewStyle().Foreground(lipgloss.Color("#F38BA8"))
 	infSty       = lipgloss.NewStyle().Foreground(lipgloss.Color("#89B4FA"))
@@ -41,7 +50,11 @@ var (
 	diffAddSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6E3A1"))              // green for added lines
 	diffDelSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F38BA8"))              // red for deleted lines
 	diffHdrSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#89B4FA"))              // blue for diff header
+	banSty       = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5C2E7"))              // pink for scrolling banner
 )
+
+// bannerText is the repeating message for the scrolling marquee.
+const bannerText = "  ✦ ELING — Auto-Learning Evolving AI Agent  ✦  Adaptive • Intelligent • Autonomous  ✦  "
 
 type clockTick struct{}
 
@@ -50,6 +63,13 @@ type errMsg string
 
 // toolCallMsg is sent from the Ask goroutine to signal a tool invocation.
 type toolCallMsg agent.ToolCallEvent
+
+// genMsg wraps any tea.Msg with a generation counter to detect stale messages
+// from old goroutines that are still running after a new query was submitted.
+type genMsg struct {
+	gen int
+	msg tea.Msg
+}
 
 // activeTool tracks a running tool invocation in the viewport.
 type activeTool struct {
@@ -83,6 +103,12 @@ type Model struct {
 	thinkingIdx     int                // index of the "thinking..." line, -1 when none
 	interruptedOnce bool               // true after first Ctrl+C during loading
 	maxMessages     int                // max messages to keep; 0 = unlimited
+	bannerOffset    int                // scrolling banner position offset
+	submitGen       int                // generation counter incremented on each submit; used to detect stale messages
+	lastKeyAt       time.Time          // timestamp of the most recent key event (paste-burst detection)
+	pasteBurst      int                // consecutive keys arriving within pasteBurstWindow
+	pasting         bool               // true while a paste burst is active; Enter inserts newline instead of submitting
+	pasteUntil      time.Time          // pasting stays true until this time
 }
 
 // NewProgram creates a new Bubbletea program with the given agent and timezone location.
@@ -92,7 +118,7 @@ func NewProgram(ag *agent.Agent, loc *time.Location) *tea.Program {
 
 	ti := textarea.New()
 	ti.Prompt = "> "
-	ti.Placeholder = "Enter to send · Alt+Enter for newline · PgUp/Dn ↑↓ scroll"
+	ti.Placeholder = "Enter to send · Alt+Enter=newline · pasted multi-line text is held until Enter"
 	ti.ShowLineNumbers = false
 	ti.CharLimit = 0
 	ti.MaxHeight = maxInputHeight
@@ -124,6 +150,7 @@ func NewProgram(ag *agent.Agent, loc *time.Location) *tea.Program {
 		msgCh:        make(chan tea.Msg, 512),
 		thinkingIdx:  -1,
 		maxMessages:  defaultMaxMessages,
+		bannerOffset: 0,
 	}
 	return tea.NewProgram(m, tea.WithAltScreen())
 }
@@ -301,7 +328,52 @@ func (m *Model) handleInputClick(displayLine, col int) {
 }
 
 // Update handles all messages and returns the updated model.
+// trackKey feeds a key event into the paste-burst detector and returns the
+// updated model plus whether we are currently inside a paste. While pasting,
+// Enter must insert a newline into the input buffer instead of submitting, so
+// pasted multi-line text is never sent prematurely.
+func (m Model) trackKey(k tea.KeyMsg) (Model, bool) {
+	now := time.Now()
+	dt := now.Sub(m.lastKeyAt)
+	m.lastKeyAt = now
+
+	// Explicit paste events (bracketed paste mode) always enter paste mode.
+	if k.Paste {
+		m.pasting = true
+		m.pasteUntil = now.Add(pasteGrace)
+		return m, true
+	}
+
+	// Fast consecutive keys = paste burst (terminals without bracketed paste
+	// deliver pasted newlines as real Enter keypresses).
+	if dt <= pasteBurstWindow {
+		m.pasteBurst++
+		if m.pasteBurst >= pasteMinBurst {
+			m.pasting = true
+			m.pasteUntil = now.Add(pasteGrace)
+		}
+	} else {
+		m.pasteBurst = 1
+	}
+
+	// Paste mode expires after a short grace period of no input.
+	if now.After(m.pasteUntil) {
+		m.pasting = false
+	}
+	return m, m.pasting
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Unwrap genMsg and check generation to detect stale messages from
+	// old goroutines that are still running after a new query was submitted.
+	if gm, ok := msg.(genMsg); ok {
+		if gm.gen != m.submitGen {
+			// Stale message from a previous submission — drop it
+			return m, listenForMsg(m.msgCh)
+		}
+		msg = gm.msg // unwrap to the inner message for normal processing
+	}
+
 	switch v := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = v.Width
@@ -369,6 +441,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// Feed the key into the paste-burst detector. While pasting, Enter
+		// inserts a newline instead of submitting (see KeyEnter below) so
+		// pasted multi-line text is held in the input buffer for review.
+		m, pasting := m.trackKey(v)
+
 		switch v.Type {
 		case tea.KeyCtrlC:
 			if m.interruptedOnce {
@@ -381,6 +458,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Type:  tea.KeyRunes,
 					Runes: []rune("\n"),
 				})
+				return m, nil
+			}
+			if pasting {
+				// Enter is part of a paste burst: keep the newline in the
+				// input buffer instead of sending to the agent.
+				m.input, _ = m.input.Update(tea.KeyMsg{
+					Type:  tea.KeyRunes,
+					Runes: []rune("\n"),
+				})
+				m.resizeInput()
 				return m, nil
 			}
 			m.historyIdx = -1
@@ -492,6 +579,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clockTick:
 		m.now = time.Now().In(m.loc)
+		m.bannerOffset++ // advance scrolling banner
 		m.resizeInput()
 		if !m.ready {
 			return m, m.tick()
@@ -652,6 +740,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) submit() (tea.Model, tea.Cmd) {
 	text := m.input.Value()
 	text = strings.TrimSpace(text)
+	// Once the user deliberately submits, paste mode no longer applies.
+	m.pasting = false
+	m.pasteBurst = 0
 	if text == "" {
 		return m, nil
 	}
@@ -691,6 +782,10 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.vp.SetContent(strings.Join(m.messages, "\n"))
 	m.vp.GotoBottom()
 
+	// Increment generation counter to detect stale messages from old goroutines
+	m.submitGen++
+	myGen := m.submitGen
+
 	ag := m.agent
 	msgCh := m.msgCh
 
@@ -700,24 +795,25 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 	// Start a goroutine that sends tool-call events and the final response
 	// through the shared channel. The Bubbletea loop reads one message at a
-	// time via listenForMsg.
+	// time via listenForMsg. Each message is wrapped with the generation
+	// counter so stale messages from old goroutines can be detected and dropped.
 	go func() {
 		defer cancel()
 		r, e := ag.Ask(ctx, text, func(evt agent.ToolCallEvent) {
 			select {
-			case msgCh <- toolCallMsg(evt):
+			case msgCh <- genMsg{gen: myGen, msg: toolCallMsg(evt)}:
 			case <-ctx.Done():
 				return
 			}
 		})
 		if e != nil {
 			select {
-			case msgCh <- errMsg(e.Error()):
+			case msgCh <- genMsg{gen: myGen, msg: errMsg(e.Error())}:
 			case <-ctx.Done():
 			}
 		} else {
 			select {
-			case msgCh <- respMsg(r):
+			case msgCh <- genMsg{gen: myGen, msg: respMsg(r)}:
 			case <-ctx.Done():
 			}
 		}
@@ -807,7 +903,7 @@ func (m Model) cmd(c string) (tea.Model, tea.Cmd) {
   /providers /provider <name>
   /evolve
 
-  Enter=submit  Alt+Enter=newline  /run=submit`[1:]))
+  Enter=submit  Alt+Enter=newline  paste w/ newlines=held  /run=submit`[1:]))
 	case "/stats":
 		for k, v := range m.agent.GetStats() {
 			m.messages = append(m.messages, fmt.Sprintf("  %s: %v", k, v))
@@ -1100,7 +1196,7 @@ func (m Model) cmd(c string) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, infSty.Render("  Skills:"))
 			for _, sk := range skills {
 				desc := agent.TruncateStr(sk.Description, 60)
-				m.messages = append(m.messages, fmt.Sprintf("  - %s: %s", sk.Name, desc))
+				m.messages = append(m.messages, infSty.Render(fmt.Sprintf("  - %s: %s", sk.Name, desc)))
 			}
 		}
 
@@ -1179,8 +1275,8 @@ func (m Model) View() string {
 			elapsedStr = fmt.Sprintf(" ⏱ %ds", int(elapsed.Seconds()))
 		}
 	}
-	header := hdrSty.Render(fmt.Sprintf(" %s%s  Memory %d  Tools %d  Skills %d",
-		clock, elapsedStr, s["memory_items"], s["tools_available"], s["learned_skills"]))
+	header := hdrSty.Render(fmt.Sprintf(" %s%s  mem %d  mcp %d  tls %d  skl %d",
+		clock, elapsedStr, s["memory_items"], s["mcp_servers"], s["tools_available"], s["learned_skills"]))
 
 	// Agent name shown above the input area, with spinner before and token info after
 	statusIndicator := "●"
@@ -1192,9 +1288,41 @@ func (m Model) View() string {
 		agentLabel = dimSty.Render(fmt.Sprintf("  %s  \u2501%s", statusIndicator, tokenStr))
 	}
 
+	// Scrollable marquee banner at the top
+	bannerRunes := []rune(bannerText)
+	bannerLen := len(bannerRunes)
+	dispW := m.width - 2
+	if dispW < 10 {
+		dispW = 10
+	}
+	// Repeat the banner text enough times to cover the display width
+	repeats := (dispW / bannerLen) + 3
+	fullBanner := strings.Repeat(bannerText, repeats)
+	fullRunes := []rune(fullBanner)
+	offset := m.bannerOffset % bannerLen
+	var bannerLine string
+	if offset+dispW <= len(fullRunes) {
+		bannerLine = string(fullRunes[offset : offset+dispW])
+	} else {
+		bannerLine = string(fullRunes[offset:])
+	}
+	banner := banSty.Render(bannerLine)
+
 	body := m.vp.View()
 	input := m.input.View()
-	return fmt.Sprintf("%s\n%s\n%s\n%s", header, body, agentLabel, input)
+	// Paste / multiline hint line shown above the input box.
+	hint := ""
+	val := m.input.Value()
+	if m.pasting {
+		hint = dimSty.Render("  ⤵ pasting… newlines are held — Enter won't send yet")
+	} else if strings.Contains(val, "\n") {
+		hint = dimSty.Render("  multiline input — Enter to send")
+	}
+	hintLine := ""
+	if hint != "" {
+		hintLine = hint + "\n"
+	}
+	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s%s", banner, header, body, agentLabel, hintLine, input)
 }
 
 func wrapText(text string, width int) string {
