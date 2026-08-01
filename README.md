@@ -86,6 +86,7 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 - **Scrollable history**: Viewport with pgup/pgdn
 - **Paste-safe input**: Multi-line pastes are held in the input box — newlines never auto-send (bracketed-paste + burst detection)
 - **Plan Mode UI**: Drafted plans render as a checklist with **y = approve / n = reject / Esc = skip** (no tools run before approval)
+- **Instant LSP diagnostics**: After `write`/`edit` on `.go`/`.py`/`.ts`/`.js` files, language-server diagnostics (gopls / pyright / typescript-language-server) are fed back as `[lsp]` lines so the model self-corrects before the next round — best-effort, silently skips if a server binary is missing
 - **Session-aware**: Displays current session, token usage, memory stats
 
 ### 📋 Session Management
@@ -426,6 +427,13 @@ memory:
 mcp:
   enabled: false
   servers: []
+
+lsp:
+  enabled: true                 # Instant diagnostics after file edits (Phase 3)
+  servers:                      # language key -> server binary (missing = skipped)
+    go: "gopls"
+    python: "pyright-langserver"
+    typescript: "typescript-language-server"
 
 session:
   auto_save: true

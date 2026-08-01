@@ -16,6 +16,7 @@ type Config struct {
 	UI      UIConfig      `yaml:"ui"`
 	Memory  MemoryConfig  `yaml:"memory"`
 	MCP     MCPConfig     `yaml:"mcp"`
+	LSP     LSPConfig     `yaml:"lsp"`
 	Session SessionConfig `yaml:"session"`
 }
 
@@ -83,6 +84,12 @@ type MCPServerConfig struct {
 	Env     map[string]string `yaml:"env"`
 }
 
+// LSPConfig configures instant diagnostics via language servers (Phase 3).
+type LSPConfig struct {
+	Enabled bool              `yaml:"enabled"`
+	Servers map[string]string `yaml:"servers"` // language key -> server binary
+}
+
 // SessionConfig configures session management.
 type SessionConfig struct {
 	AutoSave bool   `yaml:"auto_save"`
@@ -138,6 +145,14 @@ func DefaultConfig() *Config {
 		MCP: MCPConfig{
 			Enabled: false,
 			Servers: []MCPServerConfig{},
+		},
+		LSP: LSPConfig{
+			Enabled: true,
+			Servers: map[string]string{
+				"go":         "gopls",
+				"python":     "pyright-langserver",
+				"typescript": "typescript-language-server",
+			},
 		},
 		Session: SessionConfig{
 			AutoSave: true,

@@ -108,10 +108,16 @@ persistence, plan re-injection via system message. 5 dedicated tests pass
 
 ---
 
-### PHASE 3 — LSP Integration  `[instant diagnostics]`
+### PHASE 3 — LSP Integration  `[✅ DONE 2026-08-01 v0.2.4]`
 
 **Goal:** After the agent edits a file, run language-server diagnostics and feed them back
 before the model continues.
+
+**Status:** Implemented & committed (`feat: lsp integration`, v0.2.4). New `internal/lsp`
+package (minimal JSON-RPC 2.0 LSP client over stdio, Content-Length framed), wired into
+both tool loops after `HookPostToolUse`. `write`/`edit` results gain a compact `[lsp]`
+section (file:line:col SEV: message, capped at 20). `lsp.KillAll()` mirrors
+`tools.KillRunningTools()` on TUI Ctrl+C. 17 new tests pass (12 lsp + 5 agent).
 
 **Design:**
 

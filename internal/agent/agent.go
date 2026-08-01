@@ -23,6 +23,7 @@ import (
 
 	"eling/internal/config"
 	"eling/internal/layers"
+	"eling/internal/lsp"
 	"eling/internal/mcp"
 	"eling/internal/provider"
 	"eling/internal/session"
@@ -235,6 +236,10 @@ func New(cfg *config.Config) (*Agent, error) {
 			}
 		}
 	}
+
+	// Phase 3 (Qwen-code steal): configure the instant-diagnostics LSP client.
+	// Best-effort — missing server binaries are silently skipped.
+	lsp.Configure(lsp.Config{Enabled: cfg.LSP.Enabled, Servers: cfg.LSP.Servers})
 
 	return a, nil
 }
@@ -530,9 +535,9 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 
 			// Fire error-occurred hook
 			a.fireHook(layers.HookErrorOccurred, map[string]interface{}{
-				"error":      err.Error(),
-				"context":    prompt,
-				"tool_name":  "ask",
+				"error":     err.Error(),
+				"context":   prompt,
+				"tool_name": "ask",
 			})
 
 			return "", err
@@ -551,9 +556,9 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 			timeoutErr := fmt.Errorf("turn timed out after %d seconds (retried %d times): %w",
 				int(time.Since(startTime).Seconds()), maxRetries, lastErr)
 			a.fireHook(layers.HookErrorOccurred, map[string]interface{}{
-				"error":      timeoutErr.Error(),
-				"context":    prompt,
-				"tool_name":  "ask_timeout",
+				"error":     timeoutErr.Error(),
+				"context":   prompt,
+				"tool_name": "ask_timeout",
 			})
 			return "", timeoutErr
 		}
@@ -755,6 +760,10 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 				hookCtx["error"] = execErr.Error()
 			}
 			a.fireHook(layers.HookPostToolUse, hookCtx)
+
+			// Phase 3: feed instant LSP diagnostics back to the model so it
+			// can self-correct syntax/type errors before the next round.
+			resultText = a.augmentToolResultWithLSP(tc.Function.Name, args, resultText)
 
 			errStr := ""
 			if execErr != nil {
@@ -1422,6 +1431,10 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 			}
 			a.fireHook(layers.HookPostToolUse, hookCtx)
 
+			// Phase 3: feed instant LSP diagnostics back to the model so it
+			// can self-correct syntax/type errors before the next round.
+			resultText = a.augmentToolResultWithLSP(tc.Function.Name, args, resultText)
+
 			errStr := ""
 			if execErr != nil {
 				errStr = execErr.Error()
@@ -1977,6 +1990,49 @@ func (a *Agent) restoreDynamicTool(dt tools.DynamicTool) {
 // safeMarshalCompactJSON marshals v to compact JSON (no indentation),
 // recovering from any panic (e.g. corrupted slice metadata).
 // Returns the JSON bytes as a string, or a fallback string representation if marshaling fails.
+// augmentToolResultWithLSP appends instant LSP diagnostics to the result of
+// file-editing tools (write/edit). Best-effort: disabled config, unsupported
+// extensions, missing server binaries, or unreadable files are silently
+// ignored — the model just doesn't get a [lsp] section.
+func (a *Agent) augmentToolResultWithLSP(toolName string, args map[string]interface{}, resultText string) string {
+	if a.cfg == nil || !a.cfg.LSP.Enabled {
+		return resultText
+	}
+	switch toolName {
+	case "write", "edit":
+	default:
+		return resultText
+	}
+	path, _ := args["file_path"].(string)
+	if path == "" {
+		path, _ = args["path"].(string)
+	}
+	if path == "" || !lsp.Supports(path) {
+		return resultText
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return resultText
+	}
+	diags := lsp.Diagnostics(path, string(content))
+	if len(diags) == 0 {
+		return resultText
+	}
+	if len(diags) > 20 {
+		diags = diags[:20]
+	}
+	var sb strings.Builder
+	sb.WriteString("\n[lsp]")
+	for _, d := range diags {
+		msg := strings.TrimSpace(d.Message)
+		if msg == "" {
+			continue
+		}
+		fmt.Fprintf(&sb, "\n  %s:%d:%d %s: %s", path, d.Line+1, d.Col+1, d.SeverityText(), msg)
+	}
+	return resultText + sb.String()
+}
+
 func safeMarshalCompactJSON(v interface{}) string {
 	var data []byte
 	var marshalErr error
@@ -2463,7 +2519,6 @@ func (a *Agent) generateLLMSummary(entries []session.Entry, sampleEnd int) {
 
 	log.Printf("generateLLMSummary: generated new summary (%d chars)", len(newSummary))
 }
-
 
 // autoLearn uses the LLM to decide if a reusable skill should be
 // learned from this exchange. Ported from the Python eling-agent's

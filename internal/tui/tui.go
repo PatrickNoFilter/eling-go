@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"eling/internal/agent"
+	"eling/internal/lsp"
 	"eling/internal/tools"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -99,22 +100,22 @@ type Model struct {
 	startTime       time.Time
 	loc             *time.Location // timezone location for clock display
 	spinner         spinner.Model
-	inputVisible    int                // current visible height set on the textarea widget
-	history         []string           // previously submitted inputs (newest last)
-	historyIdx      int                // -1 = current draft, 0..len-1 = history position
-	msgCh           chan tea.Msg       // channel for tool-call / response messages
-	cancel          context.CancelFunc // cancels current AskStream
-	activeTools     []activeTool       // currently-in-flight tool calls
-	thinkingIdx     int                // index of the "thinking..." line, -1 when none
-	interruptedOnce bool               // true after first Ctrl+C during loading
-	maxMessages     int                // max messages to keep; 0 = unlimited
-	bannerOffset    int                // scrolling banner position offset
-	submitGen       int                // generation counter incremented on each submit; used to detect stale messages
-	lastKeyAt       time.Time          // timestamp of the most recent key event (paste-burst detection)
-	pasteBurst      int                // consecutive keys arriving within pasteBurstWindow
-	pasting         bool               // true while a paste burst is active; Enter inserts newline instead of submitting
-	pasteUntil      time.Time          // pasting stays true until this time
-	awaitingPlan    bool               // true while a drafted plan is waiting for y/N/Esc approval
+	inputVisible    int                    // current visible height set on the textarea widget
+	history         []string               // previously submitted inputs (newest last)
+	historyIdx      int                    // -1 = current draft, 0..len-1 = history position
+	msgCh           chan tea.Msg           // channel for tool-call / response messages
+	cancel          context.CancelFunc     // cancels current AskStream
+	activeTools     []activeTool           // currently-in-flight tool calls
+	thinkingIdx     int                    // index of the "thinking..." line, -1 when none
+	interruptedOnce bool                   // true after first Ctrl+C during loading
+	maxMessages     int                    // max messages to keep; 0 = unlimited
+	bannerOffset    int                    // scrolling banner position offset
+	submitGen       int                    // generation counter incremented on each submit; used to detect stale messages
+	lastKeyAt       time.Time              // timestamp of the most recent key event (paste-burst detection)
+	pasteBurst      int                    // consecutive keys arriving within pasteBurstWindow
+	pasting         bool                   // true while a paste burst is active; Enter inserts newline instead of submitting
+	pasteUntil      time.Time              // pasting stays true until this time
+	awaitingPlan    bool                   // true while a drafted plan is waiting for y/N/Esc approval
 	planCh          chan agent.PlanVerdict // receives the user's plan verdict (non-nil only while awaitingPlan)
 }
 
@@ -444,6 +445,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if v.Type == tea.KeyCtrlC && m.cancel != nil {
 				m.cancel()
 				tools.KillRunningTools()
+				lsp.KillAll() // stop language servers (Phase 3)
 				// Save state immediately so the interrupted prompt is persisted
 				_ = m.agent.SaveState()
 				m.loading = false
@@ -744,7 +746,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if line == "" {
 				continue
 			}
-			m.messages = append(m.messages, txtSty.Render("  " + line))
+			m.messages = append(m.messages, txtSty.Render("  "+line))
 		}
 		m.messages = append(m.messages, infSty.Render("  [y] approve   [n] reject   [Esc] skip plan mode"))
 		if m.ready {
