@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -94,10 +95,19 @@ func init() {
 }
 
 // bashExecute runs a bash command with timeout protection.
+// Phase 1: when the sandbox is enabled (default), commands run in an
+// isolated per-invocation directory with a scrubbed environment and a
+// destructive-command guard. Passing `allow_host: true` opts out of the
+// sandbox for commands that must touch the real tree (git add, rebuild.sh).
 func bashExecute(args map[string]interface{}) (interface{}, error) {
 	command, _ := args["command"].(string)
 	if command == "" {
 		return Err("command is required"), nil
+	}
+
+	allowHost, _ := args["allow_host"].(bool)
+	if v, ok := args["allow_host"].(string); ok {
+		allowHost = v == "true" || v == "1" || v == "yes"
 	}
 
 	timeoutSec := 30
@@ -113,10 +123,47 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 		dir, _ = args["dir"].(string)
 	}
 
+	// ── Phase 1 sandbox ────────────────────────────────────────────────────
+	sandboxed := false
+	sandboxDir := ""
+	var env []string
+	if SandboxEnabled() && !allowHost {
+		// Destructive-command guard: block (or warn) before anything runs.
+		if bad, why := destructiveCommand(command); bad {
+			if sandboxGuardMode() == "warn" {
+				command = fmt.Sprintf("echo '[sandbox-warn] potentially destructive command matched: %s'; %s", why, command)
+			} else {
+				return OK(map[string]interface{}{
+					"exit_code": -1,
+					"stdout":    "",
+					"stderr":    fmt.Sprintf("[sandbox] blocked: command matches destructive pattern %s\nUse allow_host: true to run against the real tree.", why),
+					"command":   command,
+					"blocked":   true,
+					"sandbox":   true,
+				}), nil
+			}
+		}
+		// Fresh per-invocation directory.
+		sandboxDir = newSandboxDir()
+		if err := os.MkdirAll(sandboxDir, 0o755); err != nil {
+			return Err("sandbox: create sandbox dir: " + err.Error()), nil
+		}
+		if dir == "" {
+			dir = sandboxDir // commands default into the sandbox
+		}
+		env = scrubEnv(sandboxDir)
+		command = wrapNetworkIsolation(command)
+		sandboxed = true
+	}
+	// ───────────────────────────────────────────────────────────────────────
+
 	// Create command
 	cmd := exec.Command("bash", "-c", command)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = env
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	trackCmd(cmd)
@@ -162,6 +209,10 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 			"stdout":    stdoutStr,
 			"stderr":    stderrStr,
 			"command":   command,
+			"sandbox":   sandboxed,
+		}
+		if sandboxed {
+			result["sandbox_dir"] = sandboxDir
 		}
 
 		return OK(result), nil
@@ -179,12 +230,17 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 		if stderr.Len() >= maxBashOutputBytes {
 			stderrStr += "\n... [stderr truncated at 512 KiB]"
 		}
-		return OK(map[string]interface{}{
+		result := map[string]interface{}{
 			"exit_code": -1,
 			"stdout":    stdoutStr,
 			"stderr":    stderrStr + fmt.Sprintf("\n[command timed out after %d seconds]", timeoutSec),
 			"command":   command,
 			"timed_out": true,
-		}), nil
+			"sandbox":   sandboxed,
+		}
+		if sandboxed {
+			result["sandbox_dir"] = sandboxDir
+		}
+		return OK(result), nil
 	}
 }

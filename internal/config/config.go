@@ -19,6 +19,7 @@ type Config struct {
 	LSP     LSPConfig     `yaml:"lsp"`
 	Session SessionConfig `yaml:"session"`
 	Server  ServerConfig  `yaml:"server"`
+	Sandbox SandboxConfig `yaml:"sandbox"`
 }
 
 // AgentConfig configures the AI agent.
@@ -104,6 +105,18 @@ type ServerConfig struct {
 	Token   string `yaml:"token"` // Bearer token; empty = loopback-only, no auth
 }
 
+// SandboxConfig configures bash sandboxing (Phase 1). When enabled, every
+// bash command runs in an isolated per-invocation directory with a scrubbed
+// environment and a destructive-command guard. Real-tree operations require
+// the explicit `allow_host: true` opt-in arg on the bash tool.
+type SandboxConfig struct {
+	Enabled  bool   `yaml:"enabled"`            // default true in Termux root env
+	Root     string `yaml:"root"`               // sandbox root dir, e.g. ~/.eling/sandbox
+	MaxOutput int   `yaml:"max_output"`          // max captured bytes (0 = default 512 KiB)
+	TimeoutSec int  `yaml:"timeout_sec"`         // default bash timeout when unset (0 = default 30s)
+	GuardMode string `yaml:"guard_mode"`         // "block" (default) or "warn" for destructive commands
+}
+
 // DefaultConfig returns the default configuration.
 func DefaultConfig() *Config {
 	homeDir, _ := os.UserHomeDir()
@@ -169,6 +182,13 @@ func DefaultConfig() *Config {
 		Server: ServerConfig{
 			Enabled: false,
 			Addr:    "127.0.0.1:8765", // loopback only by default (Termux-safe)
+		},
+		Sandbox: SandboxConfig{
+			Enabled:    true,
+			Root:       filepath.Join(homeDir, ".eling", "sandbox"),
+			MaxOutput:  0,   // 0 = default 512 KiB
+			TimeoutSec: 0,   // 0 = default 30s
+			GuardMode:  "block",
 		},
 	}
 }

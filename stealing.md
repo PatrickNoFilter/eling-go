@@ -37,10 +37,18 @@
 
 ---
 
-### PHASE 1 — Git Worktrees + Sandboxed Bash  `[biggest safety win]`
+### PHASE 1 — Git Worktrees + Sandboxed Bash  `[✅ DONE 2026-08-01 v0.3.0]`
 
 **Goal:** Every bash command runs in an isolated sandbox dir; `git` operations use
 auto-created worktrees so experiments never touch the main working tree.
+
+**Status:** Implemented & committed (`feat: sandbox + git worktrees`, v0.3.0). New
+`internal/tools/sandbox.go` (171 LOC: per-invocation dirs, env scrub w/ controlled-var
+override, 15 destructive-pattern guards, best-effort `unshare -n`), `internal/tools/worktree.go`
+(250 LOC: create/list/remove/merge), `sandbox_test.go` (7 tests). `allow_host: true` opt-in
+escape hatch on the bash tool. Config: `sandbox.enabled/root/max_output/timeout_sec/guard_mode`
+(default **on**). TUI header shows `🏝️ snd on`. Fixed a real env-var bug found by tests:
+duplicate `HOME`/`PATH` from host env overrode sandbox values (execve: last wins).
 
 **Design:**
 
@@ -218,7 +226,7 @@ hook model on top of ELING's internal `fireHook` system.
 
 | Phase | Feature | Effort | Suggested order | Commit |
 |-------|---------|--------|-----------------|--------|
-| 1 | Git Worktrees + Sandbox | M | 3rd (needs stability) | `feat: sandbox + git worktrees` |
+| 1 | Git Worktrees + Sandbox | M | 3rd (needs stability) | `feat: sandbox + git worktrees` ✅ **v0.3.0 (2026-08-01)** |
 | 2 | Plan Mode | S | **1st** ⚡ quick win | `feat: plan mode gating` ✅ **v0.2.3 (2026-08-01)** |
 | 3 | LSP Integration | M | 2nd | `feat: lsp diagnostics feedback` |
 | 4 | Daemon/ACP Mode | M | 4th | `feat: eling serve daemon` ✅ **v0.2.5 (2026-08-01)** |

@@ -698,6 +698,11 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 		// Record the assistant's tool-call turn, then execute each tool
 		// and feed the results back as "tool" messages. ReasoningContent is
 		// included so DeepSeek thinking mode accepts the follow-up request.
+		// Some providers stream tool calls WITHOUT an id — assign unique ids
+		// so the assistant tool_calls and the tool result messages always
+		// pair up (an empty id would be dropped by sanitize and the API
+		// would reject the orphaned tool_calls message).
+		resp.ToolCalls = normalizeToolCallIDs(resp.ToolCalls, toolSeq)
 		messages = append(messages, provider.Message{
 			Role:             "assistant",
 			Content:          resp.Content,
@@ -797,19 +802,16 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 		if a.cfg.Agent.AutoTest {
 			testFail := a.autoTest(messages)
 			if testFail != "" {
-				// Append a synthetic assistant tool_call BEFORE the tool
-				// result so the message sequence stays valid. OpenAI-compatible
-				// APIs reject a "tool" message that doesn't follow an
-				// assistant message declaring the same tool_call_id.
+				// Feed the test failures back as a plain user message instead
+				// of a synthetic assistant tool_calls + tool pair. The old
+				// approach used a hardcoded "_auto_test" tool_call_id that
+				// DUPLICATED across rounds when tests failed repeatedly, which
+				// DeepSeek/OpenAI reject with "insufficient tool messages
+				// following tool_calls message". A user message is protocol-safe
+				// in every position and cannot produce orphaned tool messages.
 				messages = append(messages, provider.Message{
-					Role:      "assistant",
-					Content:   "",
-					ToolCalls: []provider.ToolCall{provider.NewToolCall("_auto_test", "_auto_test", "{}")},
-				})
-				messages = append(messages, provider.Message{
-					Role:       "tool",
-					Content:    testFail,
-					ToolCallID: "_auto_test",
+					Role:    "user",
+					Content: "[Auto-test result — system-generated, not a user message]\n" + testFail,
 				})
 			}
 		}
@@ -1059,22 +1061,33 @@ func trimToolLoopMessages(msgs []provider.Message, keepLast int) []provider.Mess
 	return result
 }
 
-// sanitizeToolMessages is a defensive safety net that removes any "tool"
-// role messages whose tool_call_id was NOT declared by a preceding assistant
-// message's tool_calls. OpenAI-compatible APIs (DeepSeek, OpenAI, etc.)
-// reject requests containing orphaned tool messages with:
+// sanitizeToolMessages is a defensive safety net that repairs the message
+// sequence in BOTH directions so OpenAI-compatible APIs (DeepSeek, OpenAI,
+// etc.) never reject a request:
 //
-//	"Messages with role 'tool' must be a response to a preceding message
-//	 with 'tool_calls'"
+//  1. Drops any "tool" role message whose tool_call_id was NOT declared by a
+//     preceding assistant message's tool_calls ("orphan" tool messages).
+//  2. Strips tool_calls from any assistant message that is NOT immediately
+//     followed by tool messages responding to every tool_call_id it declared
+//     ("unsatisfied" tool calls — e.g. after an interrupted/aborted turn
+//     where the connection dropped mid-execution, or after trimming removed
+//     the results). DeepSeek rejects these with:
 //
-// This guards against every path that could produce an orphan (trimming edge
-// cases, resumed sessions, synthetic injections, provider fallbacks) so a
-// single bad message can never take down the whole request.
+//     "An assistant message with 'tool_calls' must be followed by tool
+//     messages responding to each 'tool_call_id'. (insufficient tool
+//     messages following tool_calls message)"
+//
+// This guards against every path that could produce an invalid sequence
+// (trimming edge cases, resumed sessions, interrupted turns, synthetic
+// injections, provider fallbacks) so a single bad message can never take
+// down the whole request.
 func sanitizeToolMessages(msgs []provider.Message) []provider.Message {
-	// Fast path: nothing to do if there are no tool messages at all.
+	// Fast path: nothing to do if there are no tool messages AND no assistant
+	// tool_calls messages (an assistant tool_calls with no results is itself
+	// an invalid sequence that must be stripped).
 	hasTool := false
 	for _, m := range msgs {
-		if m.Role == "tool" {
+		if m.Role == "tool" || (m.Role == "assistant" && len(m.ToolCalls) > 0) {
 			hasTool = true
 			break
 		}
@@ -1083,8 +1096,10 @@ func sanitizeToolMessages(msgs []provider.Message) []provider.Message {
 		return msgs
 	}
 
+	// Pass 1: drop orphaned tool messages (id never declared by a preceding
+	// assistant tool_calls message, or empty id).
 	declared := make(map[string]bool)
-	out := make([]provider.Message, 0, len(msgs))
+	clean := make([]provider.Message, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Role == "assistant" {
 			for _, tc := range m.ToolCalls {
@@ -1092,18 +1107,73 @@ func sanitizeToolMessages(msgs []provider.Message) []provider.Message {
 					declared[tc.ID] = true
 				}
 			}
-			out = append(out, m)
+			clean = append(clean, m)
 			continue
 		}
 		if m.Role == "tool" {
 			// Keep only if its id was declared by a preceding assistant
 			// tool_calls message. Drop orphans (including empty ids).
 			if m.ToolCallID != "" && declared[m.ToolCallID] {
-				out = append(out, m)
+				clean = append(clean, m)
 			}
 			continue
 		}
+		clean = append(clean, m)
+	}
+
+	// Pass 2: for each assistant message with tool_calls, verify its calls are
+	// satisfied by tool messages immediately following it. If not (interrupted
+	// turn, dropped results, role boundary), strip the tool_calls so the API
+	// never sees an unsatisfied tool_calls message, and drop the now-orphaned
+	// tool messages that followed it.
+	out := make([]provider.Message, 0, len(clean))
+	for i := 0; i < len(clean); i++ {
+		m := clean[i]
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			out = append(out, m)
+			continue
+		}
+
+		// Collect the ids this assistant message declares. Calls with an
+		// EMPTY id can never be satisfied: Pass 1 already dropped any tool
+		// message with an empty tool_call_id, so the API would see a
+		// tool_calls entry with no response ("insufficient tool messages
+		// following tool_calls message"). Treat them as unsatisfied.
+		want := make(map[string]bool)
+		hasEmptyID := false
+		for _, tc := range m.ToolCalls {
+			if tc.ID == "" {
+				hasEmptyID = true
+			} else {
+				want[tc.ID] = true
+			}
+		}
+
+		// Look ahead through consecutive tool messages to see which ids
+		// actually received a response.
+		j := i + 1
+		for j < len(clean) && clean[j].Role == "tool" {
+			delete(want, clean[j].ToolCallID)
+			j++
+		}
+
+		if len(want) == 0 && !hasEmptyID {
+			// Every declared call got a response — keep the assistant
+			// message and its tool results intact.
+			out = append(out, m)
+			for k := i + 1; k < j; k++ {
+				out = append(out, clean[k])
+			}
+			i = j - 1
+			continue
+		}
+
+		// Unsatisfied calls — strip tool_calls from the assistant message and
+		// drop the (now orphaned) tool results that followed it. The content
+		// (if any) is preserved so the model still sees the text.
+		m.ToolCalls = nil
 		out = append(out, m)
+		i = j - 1 // skip the tool messages; they are dropped with the calls
 	}
 	return out
 }
@@ -1368,6 +1438,10 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 
 		// ReasoningContent is included so DeepSeek thinking mode accepts the
 		// follow-up request with this assistant turn in the history.
+		// Some providers stream tool calls WITHOUT an id — assign unique ids
+		// so the assistant tool_calls and the tool result messages always
+		// pair up (see normalizeToolCallIDs).
+		toolCalls = normalizeToolCallIDs(toolCalls, toolSeq)
 		messages = append(messages, provider.Message{
 			Role:             "assistant",
 			Content:          content,
@@ -1466,17 +1540,16 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 		if a.cfg.Agent.AutoTest {
 			testFail := a.autoTest(messages)
 			if testFail != "" {
-				// Synthetic assistant tool_call before the tool result —
-				// keeps the message sequence valid for OpenAI-compatible APIs.
+				// Feed the test failures back as a plain user message instead
+				// of a synthetic assistant tool_calls + tool pair. The old
+				// approach used a hardcoded "_auto_test" tool_call_id that
+				// DUPLICATED across rounds when tests failed repeatedly, which
+				// DeepSeek/OpenAI reject with "insufficient tool messages
+				// following tool_calls message". A user message is protocol-safe
+				// in every position and cannot produce orphaned tool messages.
 				messages = append(messages, provider.Message{
-					Role:      "assistant",
-					Content:   "",
-					ToolCalls: []provider.ToolCall{provider.NewToolCall("_auto_test", "_auto_test", "{}")},
-				})
-				messages = append(messages, provider.Message{
-					Role:       "tool",
-					Content:    testFail,
-					ToolCallID: "_auto_test",
+					Role:    "user",
+					Content: "[Auto-test result — system-generated, not a user message]\n" + testFail,
 				})
 			}
 		}
@@ -2730,6 +2803,24 @@ func extractGoFiles(results []provider.Message) []string {
 	return files
 }
 
+// normalizeToolCallIDs assigns a unique, non-empty id to any tool call that
+// arrived from the provider without one. Some OpenAI-compatible providers
+// stream tool_call chunks with an id, but others omit it entirely — the
+// agent then cannot pair the assistant tool_calls message with its tool
+// result messages (empty tool_call_id tool messages are dropped by
+// sanitizeToolMessages and the API rejects the orphaned tool_calls message
+// with "insufficient tool messages following tool_calls message").
+// Synthesizing an id here keeps the conversation protocol-valid end to end.
+func normalizeToolCallIDs(calls []provider.ToolCall, base int) []provider.ToolCall {
+	now := time.Now().UnixNano()
+	for i := range calls {
+		if calls[i].ID == "" {
+			calls[i].ID = fmt.Sprintf("call_%d_%d", now, base+i)
+		}
+	}
+	return calls
+}
+
 // autoTest runs go test on touched test files after tool rounds.
 // Ported from the Python eling-agent's _auto_pytest() function.
 func (a *Agent) autoTest(results []provider.Message) string {
@@ -2776,8 +2867,43 @@ func (a *Agent) autoTest(results []provider.Message) string {
 
 	log.Printf("autoTest: running go test on %d file(s)", len(targets))
 
+	// Go rejects `go test <file1> <file2>` when the named files live in
+	// different directories OR mix absolute/relative paths ("named files
+	// must all be in one directory"). Tool results can contain both
+	// (/root/eling/... and eling/...), so instead of passing files we
+	// group the targets by package directory (normalized to absolute
+	// paths so mixed forms dedupe to the same key) and run
+	// `go test ./pkg...` once per touched package. This is protocol-safe
+	// and compiles each package properly (file-mode also fails to resolve
+	// module imports).
+	pkgDirs := make(map[string]bool)
+	for _, t := range targets {
+		abs, err := filepath.Abs(t)
+		if err != nil {
+			abs = t
+		}
+		pkgDirs[filepath.Dir(abs)] = true
+	}
+	// Resolve against the absolute working directory so filepath.Rel can
+	// relativize absolute package dirs (Rel("." , abs) errors on mixed
+	// relative/absolute inputs, which would silently fall back to the
+	// absolute path — valid for go test, but noisy).
+	cwd, _ := os.Getwd()
+	if cwd == "" {
+		cwd = "."
+	}
+	pkgArgs := make([]string, 0, len(pkgDirs))
+	for d := range pkgDirs {
+		if rel, err := filepath.Rel(cwd, d); err == nil && !strings.HasPrefix(rel, "..") {
+			pkgArgs = append(pkgArgs, "./"+filepath.ToSlash(rel))
+		} else {
+			pkgArgs = append(pkgArgs, d)
+		}
+	}
+	sort.Strings(pkgArgs)
+
 	// Run go test with short mode and verbose only on failures
-	args := append([]string{"test", "-short", "-count=1"}, targets...)
+	args := append([]string{"test", "-short", "-count=1"}, pkgArgs...)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", args...)

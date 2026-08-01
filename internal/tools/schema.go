@@ -22,9 +22,37 @@ var paramSchemas = map[string]map[string]interface{}{
 		"properties": map[string]interface{}{
 			"command":     map[string]interface{}{"type": "string", "description": "The shell command to run."},
 			"timeout_sec": map[string]interface{}{"type": "number", "description": "Optional timeout in seconds (default 30)."},
-			"working_dir": map[string]interface{}{"type": "string", "description": "Optional working directory."},
+			"working_dir": map[string]interface{}{"type": "string", "description": "Optional working directory (defaults to sandbox when enabled)."},
+			"allow_host":  map[string]interface{}{"type": "boolean", "description": "Opt-in escape hatch: run against the real tree instead of the sandbox. Only use for commands that MUST touch the host (git add, rebuild.sh). Default false."},
 		},
 		"required": []string{"command"},
+	},
+	"worktree_create": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"name":        map[string]interface{}{"type": "string", "description": "Worktree name (alnum, dash, dot, underscore; max 64)."},
+			"base_branch": map[string]interface{}{"type": "string", "description": "Branch to branch from (default: current branch)."},
+		},
+		"required": []string{"name"},
+	},
+	"worktree_list": {
+		"type": "object",
+		"properties": map[string]interface{}{},
+	},
+	"worktree_remove": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"name": map[string]interface{}{"type": "string", "description": "Worktree name to remove."},
+		},
+		"required": []string{"name"},
+	},
+	"worktree_merge": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"name":   map[string]interface{}{"type": "string", "description": "Worktree name to merge back."},
+			"target": map[string]interface{}{"type": "string", "description": "Branch to merge into (default: current branch)."},
+		},
+		"required": []string{"name"},
 	},
 	"read": {
 		"type": "object",

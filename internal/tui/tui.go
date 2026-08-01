@@ -1390,8 +1390,12 @@ func (m Model) View() string {
 			elapsedStr = fmt.Sprintf(" ⏱ %ds", int(elapsed.Seconds()))
 		}
 	}
-	header := hdrSty.Render(fmt.Sprintf(" %s%s  mem %d  mcp %d  tls %d  skl %d",
-		clock, elapsedStr, s["memory_items"], s["mcp_servers"], s["tools_available"], s["learned_skills"]))
+	sandboxStr := "snd off"
+	if tools.SandboxEnabled() {
+		sandboxStr = "🏝️ snd on"
+	}
+	header := hdrSty.Render(fmt.Sprintf(" %s%s  mem %d  mcp %d  tls %d  skl %d  %s",
+		clock, elapsedStr, s["memory_items"], s["mcp_servers"], s["tools_available"], s["learned_skills"], sandboxStr))
 
 	// Agent name shown above the input area, with spinner before and token info after
 	statusIndicator := "●"

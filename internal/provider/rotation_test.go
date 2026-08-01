@@ -526,6 +526,10 @@ func TestRateLimitDoesNotTriggerRotation(t *testing.T) {
 		BaseURL:    ts.URL,
 		Model:      "test-model",
 	})
+	// This test verifies rotation behavior, not retry behavior — disable
+	// retries so the 429 backoff sleep (default 5 retries × exponential
+	// backoff ≈ 39s) doesn't stall the suite.
+	p.SetRetryConfig(RetryConfig{MaxRetries: 0})
 
 	ctx := context.Background()
 	msg := Message{Role: "user", Content: "hello"}
@@ -550,6 +554,10 @@ func TestDNSErrorDoesNotTriggerRotation(t *testing.T) {
 		BaseURL:    "http://nonexistent.example.invalid:9999",
 		Model:      "test-model",
 	})
+	// This test verifies rotation behavior, not retry behavior — disable
+	// retries so the per-attempt connection timeout + 5× backoff sleeps
+	// (≈ 50s) don't stall the suite.
+	p.SetRetryConfig(RetryConfig{MaxRetries: 0})
 
 	ctx := context.Background()
 	msg := Message{Role: "user", Content: "hello"}

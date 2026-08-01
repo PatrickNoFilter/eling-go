@@ -20,6 +20,7 @@ import (
 	"eling/internal/logger"
 	"eling/internal/markdownify"
 	"eling/internal/mcp/skill"
+	"eling/internal/tools"
 	"eling/internal/tui"
 
 	"github.com/briandowns/spinner"
@@ -157,7 +158,7 @@ func recoverWithStack(ag *agent.Agent) {
 	}
 }
 
-const Version = "0.2.5"
+const Version = "0.3.0"
 
 func main() {
 	apiKey := flag.String("api-key", "", "DeepSeek API key (or set DEEPSEEK_API_KEY env var)")
@@ -368,6 +369,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
+
+	// Phase 1: configure the bash sandbox from config (default on).
+	tools.SetSandbox(tools.SandboxSettings{
+		Enabled:    cfg.Sandbox.Enabled,
+		Root:       cfg.Sandbox.Root,
+		MaxOutput:  cfg.Sandbox.MaxOutput,
+		TimeoutSec: cfg.Sandbox.TimeoutSec,
+		GuardMode:  cfg.Sandbox.GuardMode,
+	})
 
 	// Plan mode: CLI flag overrides config; enables the draft-then-approve
 	// gate. The TUI attaches an interactive PlanApprover per submit; the

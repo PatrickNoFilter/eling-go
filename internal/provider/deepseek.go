@@ -789,20 +789,32 @@ func isAuthError(err error) bool {
 // ring and retries. This repeats until a key works or all keys are exhausted.
 // sanitizeToolMessages is a final safety net applied to EVERY request,
 // regardless of which caller built the message list. OpenAI-compatible APIs
-// (DeepSeek, OpenAI, etc.) reject any "tool" role message whose tool_call_id
-// was not declared by a preceding assistant message's tool_calls:
+// (DeepSeek, OpenAI, etc.) reject invalid tool sequences in BOTH directions:
 //
-//	"Messages with role 'tool' must be a response to a preceding message
-//	 with 'tool_calls'"
+//  1. "tool" role messages whose tool_call_id was NOT declared by a preceding
+//     assistant message's tool_calls:
+//
+//     "Messages with role 'tool' must be a response to a preceding message
+//     with 'tool_calls'"
+//
+//  2. assistant messages with tool_calls that are NOT immediately followed by
+//     tool messages responding to every tool_call_id they declared (e.g. after
+//     an interrupted/aborted turn or a trimmed result):
+//
+//     "An assistant message with 'tool_calls' must be followed by tool
+//     messages responding to each 'tool_call_id'. (insufficient tool
+//     messages following tool_calls message)"
 //
 // This guards every path (agent tool loop, resumed sessions, synthetic
 // injections, provider fallbacks, third-party callers) so a single bad
 // message can never take down the whole request.
 func sanitizeToolMessages(msgs []Message) []Message {
-	// Fast path: nothing to do if there are no tool messages at all.
+	// Fast path: nothing to do if there are no tool messages AND no assistant
+	// tool_calls messages (an assistant tool_calls with no results is itself
+	// an invalid sequence that must be stripped).
 	hasTool := false
 	for _, m := range msgs {
-		if m.Role == "tool" {
+		if m.Role == "tool" || (m.Role == "assistant" && len(m.ToolCalls) > 0) {
 			hasTool = true
 			break
 		}
@@ -811,8 +823,10 @@ func sanitizeToolMessages(msgs []Message) []Message {
 		return msgs
 	}
 
+	// Pass 1: drop orphaned tool messages (id never declared by a preceding
+	// assistant tool_calls message, or empty id).
 	declared := make(map[string]bool)
-	out := make([]Message, 0, len(msgs))
+	clean := make([]Message, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Role == "assistant" {
 			for _, tc := range m.ToolCalls {
@@ -820,18 +834,73 @@ func sanitizeToolMessages(msgs []Message) []Message {
 					declared[tc.ID] = true
 				}
 			}
-			out = append(out, m)
+			clean = append(clean, m)
 			continue
 		}
 		if m.Role == "tool" {
 			// Keep only if its id was declared by a preceding assistant
 			// tool_calls message. Drop orphans (including empty ids).
 			if m.ToolCallID != "" && declared[m.ToolCallID] {
-				out = append(out, m)
+				clean = append(clean, m)
 			}
 			continue
 		}
+		clean = append(clean, m)
+	}
+
+	// Pass 2: for each assistant message with tool_calls, verify its calls are
+	// satisfied by tool messages immediately following it. If not (interrupted
+	// turn, dropped results, role boundary), strip the tool_calls so the API
+	// never sees an unsatisfied tool_calls message, and drop the now-orphaned
+	// tool messages that followed it.
+	out := make([]Message, 0, len(clean))
+	for i := 0; i < len(clean); i++ {
+		m := clean[i]
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			out = append(out, m)
+			continue
+		}
+
+		// Collect the ids this assistant message declares. Calls with an
+		// EMPTY id can never be satisfied: Pass 1 already dropped any tool
+		// message with an empty tool_call_id, so the API would see a
+		// tool_calls entry with no response ("insufficient tool messages
+		// following tool_calls message"). Treat them as unsatisfied.
+		want := make(map[string]bool)
+		hasEmptyID := false
+		for _, tc := range m.ToolCalls {
+			if tc.ID == "" {
+				hasEmptyID = true
+			} else {
+				want[tc.ID] = true
+			}
+		}
+
+		// Look ahead through consecutive tool messages to see which ids
+		// actually received a response.
+		j := i + 1
+		for j < len(clean) && clean[j].Role == "tool" {
+			delete(want, clean[j].ToolCallID)
+			j++
+		}
+
+		if len(want) == 0 && !hasEmptyID {
+			// Every declared call got a response — keep the assistant
+			// message and its tool results intact.
+			out = append(out, m)
+			for k := i + 1; k < j; k++ {
+				out = append(out, clean[k])
+			}
+			i = j - 1
+			continue
+		}
+
+		// Unsatisfied calls — strip tool_calls from the assistant message and
+		// drop the (now orphaned) tool results that followed it. The content
+		// (if any) is preserved so the model still sees the text.
+		m.ToolCalls = nil
 		out = append(out, m)
+		i = j - 1 // skip the tool messages; they are dropped with the calls
 	}
 	return out
 }
@@ -1472,12 +1541,20 @@ func humanizeSimpleError(statusCode int, msg, code string) string {
 }
 
 // assembleToolCalls converts pending tool-call fragments into a slice of
-// ToolCall, maintaining insertion order.
+// ToolCall, maintaining insertion order. Tool calls streamed without an id
+// (some OpenAI-compatible providers omit it) get a synthesized unique id so
+// the assistant tool_calls message and its tool result messages always pair
+// up — an empty id would otherwise be dropped by sanitizeToolMessages and
+// the API would reject the orphaned tool_calls message.
 func assembleToolCalls(pending map[int]*pendingCall, order []int) []ToolCall {
 	toolCalls := make([]ToolCall, 0, len(order))
-	for _, idx := range order {
+	now := time.Now().UnixNano()
+	for i, idx := range order {
 		pc := pending[idx]
 		tc := ToolCall{ID: pc.id, Type: "function"}
+		if tc.ID == "" {
+			tc.ID = fmt.Sprintf("call_%d_%d", now, i)
+		}
 		tc.Function.Name = pc.name
 		tc.Function.Arguments = pc.args
 		toolCalls = append(toolCalls, tc)

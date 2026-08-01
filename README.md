@@ -114,6 +114,8 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 - **Crash detection**: Detects previous crashes on startup (SIGBUS, SIGSEGV)
 - **PID file management**: Single-instance enforcement with graceful kill
 - **Tool output limits**: 512 KiB cap per command, 256 KiB per tool result
+- **Bash sandbox** (v0.3.0): every `bash` command runs in a fresh per-invocation dir under `~/.eling/sandbox/` with a scrubbed env (locked PATH, HOME redirected, `ELING_SANDBOX=1`, API keys stripped), a 15-pattern destructive-command guard (`rm -rf /`, `mkfs`, `dd of=/dev/*`, fork bombs, `curl|sh`, …) that blocks by default, and best-effort network isolation via `unshare -n`. Real-tree operations require the explicit `allow_host: true` opt-in arg. Config: `sandbox.enabled/root/max_output/timeout_sec/guard_mode` (default **on**; `guard_mode: warn` downgrades blocks to warnings). TUI header shows `🏝️ snd on`.
+- **Git worktrees** (v0.3.0): `worktree_create`/`worktree_list`/`worktree_remove`/`worktree_merge` tools let the agent experiment on isolated branches under `~/.eling/worktrees/` — experiments never touch the main working tree until explicitly merged back
 - **UTF-8 safe**: Rune-aware truncation prevents splitting multi-byte chars
 - **Auto-backup before write/edit**: Every `write`/`edit` snapshots the existing file to `*.bak.<timestamp>` (rotation keeps the last 5; configurable via `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP`)
 - **Web timeout prediction**: `web_fetch`/`web_search` do a fast DNS+TCP preflight probe (dead hosts fail in ~1.5s) and adapt `--max-time` per host based on observed latency/failure history
@@ -470,6 +472,13 @@ lsp:
 session:
   auto_save: true
   save_dir: "~/.eling/sessions"
+
+sandbox:                        # Phase 1: bash isolation (v0.3.0)
+  enabled: true                 # Run bash in isolated dirs w/ scrubbed env
+  root: "~/.eling/sandbox"      # Sandbox root (per-invocation run-* subdirs)
+  max_output: 0                 # 0 = default 512 KiB
+  timeout_sec: 0                # 0 = default 30s
+  guard_mode: "block"           # "block" (default) or "warn" for destructive cmds
 ```
 
 All state is persisted to `~/.eling/`:
