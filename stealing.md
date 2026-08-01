@@ -191,32 +191,43 @@ and graceful SIGINT/SIGTERM shutdown (saves all sessions), `ServerConfig`
 
 ---
 
-### PHASE 5 — User-Defined Hooks  `[extend, don't build — ELING already has hooks!]`
+### PHASE 5 — User-Defined Hooks  `[✅ DONE 2026-08-01 539c18f]`
 
 **Goal:** Let users attach shell scripts to the existing 7 lifecycle events — the Qwen Code
 hook model on top of ELING's internal `fireHook` system.
 
+**Status:** Implemented & committed (`539c18f fix: autoTest reliability + feat: user-defined
+hooks`, Phase 5 of qwen heist). New `internal/hooks/hooks.go` (173 LOC): `RegisterUserHooks`
+bridges `config.yaml` → `hooks.scripts.<event>` to Brain hook handlers (5s timeout per script,
+JSON context on stdin, failures logged & swallowed — never crash the agent), `CheckVeto`
+wired into BOTH tool loops (`runToolLoop` + `runStreamToolLoop`) so `pre_tool_use` scripts
+can veto calls via `{"block":true,"reason":"..."}`. Unknown hook names warn instead of
+silently never firing. 7 tests pass (`internal/hooks/hooks_test.go`).
+
 **Design:**
 
-1. **Config:** `hooks: { pre_tool_use: ["/path/script.sh", ...], post_tool_use: [...], error_occurred: [...] }`
-   parsed in `internal/config/*` into `map[string][]string`.
-2. **Bridge in `internal/layers/hooks.go`** (or new `internal/hooks/hooks.go`):
-   - Register a `layers.HookHandler` that, for each configured script, runs it via `exec.Command`
-     with the hook context JSON on stdin (`{"tool":"bash","args":{...},"duration_ms":123}`).
-   - 5s timeout per script; stderr captured; failures logged, never crash the agent
-     (mirror the recover pattern in `fireHook`, `agent.go:285`).
-3. **Document the 7 events** in `README.md` + `docs/` with examples (e.g., `post_tool_use`
-   script that runs `go vet` after any `edit` on a `.go` file).
-4. Scripts that output `{"block": true, "reason": "..."}` on stdin-result for `pre_tool_use`
-   can veto a tool call (pre-tool gate — new capability).
+1. **Config:** `hooks: { scripts: { pre_tool_use: ["/path/script.sh", ...], post_tool_use: [...], error_occurred: [...] } }`
+   parsed in `internal/config/config.go` into `HooksConfig{ Scripts map[string][]string }`.
+2. **Bridge in `internal/hooks/hooks.go`:**
+   - `RegisterUserHooks(brain, scripts)` — for each configured script, registers a
+     `layers.HookHandler` closure that runs it via `exec.CommandContext` with the hook
+     context JSON on stdin (`{"tool_name":"bash","arguments":"{...}","duration_ms":123}`).
+   - 5s timeout per script (`scriptTimeout`); stderr captured; stdout capped at 64 KiB;
+     panic-recover mirrors `fireHook` (`agent.go:285`).
+3. **Pre-tool gate:** scripts emitting `{"block": true, "reason": "..."}` on stdout for
+   `pre_tool_use` veto the tool call before execution (`hooks.CheckVeto` + blocked result
+   returned to the model so it knows why).
+4. Documented in `README.md` + `docs/` (see Hooks section).
+5. Same commit also fixed the autoTest tool (see below).
 
-**Files touched:** `internal/hooks/hooks.go` (new), `internal/config/*`, `internal/agent/agent.go` (wire bridge in `New`),
-`README.md`, `docs/*`.
+**Files touched:** `internal/hooks/hooks.go` (new), `internal/hooks/hooks_test.go` (new),
+`internal/config/config.go` (HooksConfig), `internal/agent/agent.go` (wire bridge in
+`SetBrain`, veto gate in both tool loops), `README.md`, `docs/*`.
 
 **Acceptance:**
-- [ ] A `post_tool_use` script appends a marker file after any `edit` — marker appears
-- [ ] A `pre_tool_use` script returning `{"block":true}` prevents the tool call
-- [ ] Missing script path → warning, no crash
+- [x] A `post_tool_use` script appends a marker file after any `edit` — marker appears (test: `TestRegisterUserHooksFiresPostToolUse`)
+- [x] A `pre_tool_use` script returning `{"block":true}` prevents the tool call (test: `TestPreToolUseVeto`)
+- [x] Missing script path → warning, no crash (test: `TestMissingScriptDoesNotCrash`)
 
 **Effort:** S–M (1 day) · **Risk:** low
 
@@ -228,9 +239,9 @@ hook model on top of ELING's internal `fireHook` system.
 |-------|---------|--------|-----------------|--------|
 | 1 | Git Worktrees + Sandbox | M | 3rd (needs stability) | `feat: sandbox + git worktrees` ✅ **v0.3.0 (2026-08-01)** |
 | 2 | Plan Mode | S | **1st** ⚡ quick win | `feat: plan mode gating` ✅ **v0.2.3 (2026-08-01)** |
-| 3 | LSP Integration | M | 2nd | `feat: lsp diagnostics feedback` |
+| 3 | LSP Integration | M | 2nd | `feat: lsp diagnostics feedback` ✅ **v0.2.4 (2026-08-01)** |
 | 4 | Daemon/ACP Mode | M | 4th | `feat: eling serve daemon` ✅ **v0.2.5 (2026-08-01)** |
-| 5 | User-Defined Hooks | S–M | 5th (leverages existing system) | `feat: user-defined hooks` |
+| 5 | User-Defined Hooks | S–M | 5th (leverages existing system) | `feat: user-defined hooks` ✅ **539c18f (2026-08-01)** |
 
 **Suggested sprint:** Phase 2 → 3 → 1 → 4 → 5 (quick wins first, big-ticket items
 after the safety net from Phase 1 exists).

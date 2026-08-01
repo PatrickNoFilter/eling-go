@@ -390,6 +390,9 @@ eling/
 │   │   └── rotation_test.go       # Key rotation tests
 │   ├── session/
 │   │   └── session.go             # Session save/resume, manager, metadata
+│   ├── hooks/
+│   │   ├── hooks.go               # 🪝 User-defined shell-script lifecycle hooks (Phase 5)
+│   │   └── hooks_test.go          # Veto gate, JSON ctx, missing-script safety tests
 │   ├── tools/
 │   │   ├── registry.go            # Dynamic tool registry (thread-safe, category-aware)
 │   │   ├── bash.go                # Shell execution with timeout + output limits
@@ -434,6 +437,8 @@ agent:
   max_turn_duration: 0            # Wall-clock timeout (0 = no timeout)
   max_turn_duration_retries: 2   # Retries on timeout
   auto_test: true                 # Auto-run go test on touched files
+  auto_test_timeout_sec: 180      # Per-run go test timeout (slow ARM builds ~95s cold)
+  auto_test_cooldown_sec: 10      # Min seconds between runs (memoized speedup)
   learn_from_exchange: true       # LLM-based skill learning (autoLearn)
   providers:
     - name: "opencode-zen"
@@ -479,6 +484,12 @@ sandbox:                        # Phase 1: bash isolation (v0.3.0)
   max_output: 0                 # 0 = default 512 KiB
   timeout_sec: 0                # 0 = default 30s
   guard_mode: "block"           # "block" (default) or "warn" for destructive cmds
+
+hooks:                          # Phase 5: user-defined shell-script hooks (v0.3.1)
+  scripts:                      # event -> list of script paths (run in order)
+    pre_tool_use: []            # can veto via {"block":true,"reason":"..."} on stdout
+    post_tool_use: []           # e.g. run go vet after every edit of a .go file
+    error_occurred: []
 ```
 
 All state is persisted to `~/.eling/`:
@@ -494,6 +505,65 @@ All state is persisted to `~/.eling/`:
 - `eling.log` — Application log
 - `crash_report.log` — Panic/bus error crash reports
 - `eling.pid` — PID file for single-instance enforcement
+
+---
+
+## 🪝 User-Defined Hooks (v0.3.1)
+
+Attach shell scripts to ELING's lifecycle events — the Qwen Code hook model on top of
+ELING's internal `fireHook` system (Phase 5 of the feature heist).
+
+**Available events** (7 canonical lifecycle hooks):
+
+| Event | When it fires | Script stdin (JSON) |
+|-------|---------------|---------------------|
+| `session_start` | Agent created | `{"agent":"eling-go","version":"...","total_hooks":N}` |
+| `pre_user_message` | Before user message is processed | `{"role":"user","content":"..."}` |
+| `post_user_message` | After user message is stored | same |
+| `post_assistant_message` | After a model reply | `{"role":"assistant","content":"..."}` |
+| `pre_tool_use` | **Before** a tool runs — can veto | `{"tool_name":"bash","arguments":"{...}"}` |
+| `post_tool_use` | After a tool result | `{"tool_name":"edit","arguments":"{...}","result":"...","duration_ms":123}` |
+| `error_occurred` | An error was logged | `{"error":"..."}` |
+
+**Configure** in `~/.eling/config.yaml`:
+
+```yaml
+hooks:
+  scripts:
+    pre_tool_use: ["/root/hooks/guard.sh"]       # can veto tool calls
+    post_tool_use: ["/root/hooks/after-edit.sh"] # run go vet after edits
+    error_occurred: ["/root/hooks/notify.sh"]
+```
+
+**Script contract:**
+- Hook context arrives as **JSON on stdin** (see table above).
+- Scripts have a **5s timeout**; stderr is captured and logged. A failing or
+  missing script **never crashes the agent** — it logs a warning and continues.
+- For `pre_tool_use`, printing `{"block": true, "reason": "policy: no rm -rf"}`
+  on stdout **vetoes the tool call** before execution — the agent sees the
+  blocked result and reason, and can adapt.
+- Unknown event names in config warn at startup instead of silently never firing.
+
+**Example — veto `rm -rf` (guard.sh):**
+
+```bash
+#!/bin/sh
+# Read context from stdin, block destructive commands
+read -r ctx
+case "$ctx" in
+  *'rm -rf'*) echo '{"block":true,"reason":"policy: rm -rf is forbidden"}';;
+  *) echo '{"block":false}';;
+esac
+```
+
+**Example — auto `go vet` after edits (after-edit.sh):**
+
+```bash
+#!/bin/sh
+read -r ctx
+# ctx contains {"tool_name":"edit","arguments":"{...}"} — run vet on .go files
+echo "$ctx" | grep -q '"tool_name":"edit"' && (cd /root/eling && go vet ./... >/tmp/vet.log 2>&1 &)
+```
 
 ---
 

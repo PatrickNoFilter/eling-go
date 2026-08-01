@@ -101,6 +101,14 @@
 - Graceful shutdown (SIGINT/SIGTERM) saves all live sessions via `Server.Shutdown`
 - CLI: `eling serve --addr <addr> --token <token>`
 
+### 7c. User-Defined Hooks (internal/hooks/)
+- Phase 5: bridge user shell scripts to ELING's internal `fireHook` lifecycle system
+- `hooks.RegisterUserHooks(brain, scripts)` — one `layers.HookHandler` per configured script;
+  JSON context piped to stdin, 5s timeout, stdout capped at 64 KiB, failures swallowed
+- `hooks.CheckVeto(results)` — inspects `pre_tool_use` hook results; `{"block":true,"reason":"..."}`
+  vetoes the tool call in both `runToolLoop` and `runStreamToolLoop`
+- Config: `hooks.scripts.<event>: ["/path/script.sh", ...]`; unknown events warn at startup
+
 ### 8. Session Management (internal/session/)
 - Named sessions with save/resume
 - Auto-save every 5 minutes
