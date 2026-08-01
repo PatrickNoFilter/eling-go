@@ -136,6 +136,18 @@ func safeSaveState(ag *agent.Agent) {
 	}
 }
 
+// exitWithCleanup performs graceful cleanup before os.Exit, since os.Exit
+// skips deferred functions (PID file removal, clean-shutdown marker, log close).
+// Without this, an intentional exit after writePIDFile() leaves a stale PID
+// file that the next startup's DetectCrash misreports as a crash.
+func exitWithCleanup(ag *agent.Agent, code int) {
+	safeSaveState(ag)
+	removePIDFile()
+	logger.WriteCleanShutdownMarker()
+	_ = logger.Global().Close()
+	os.Exit(code)
+}
+
 // recoverWithStack catches panics, logs them to the crash log,
 // prints the stack trace to stderr, and optionally saves agent state
 // before re-exiting. Uses safeSaveState to prevent deadlock.
@@ -359,7 +371,7 @@ func main() {
 	}
 	if key == "" {
 		fmt.Println("Error: DeepSeek API key required. Set DEEPSEEK_API_KEY env var or use --api-key")
-		os.Exit(1)
+		exitWithCleanup(nil, 1)
 	}
 	for i := range cfg.Agent.Providers {
 		cfg.Agent.Providers[i].APIKey = key
@@ -410,7 +422,7 @@ func main() {
 			fmt.Println("📂 No saved sessions found.")
 			fmt.Println("   Start a conversation and it will be automatically saved.")
 			logger.Global().Info("Session list: empty")
-			os.Exit(0)
+			exitWithCleanup(ag, 0)
 		}
 		fmt.Printf("📂 %d saved session(s):\n\n", len(sessions))
 		// Load each session to show details
@@ -434,9 +446,8 @@ func main() {
 		fmt.Println()
 		fmt.Println("To resume a session:  eling --resume <name>")
 		fmt.Println("To resume last:       eling --last")
-		logger.WriteCleanShutdownMarker()
 		logger.Global().Info("Session list: %d sessions displayed", len(sessions))
-		os.Exit(0)
+		exitWithCleanup(ag, 0)
 	}
 
 	// ── Resume most recent session ───────────────────────────────────────
@@ -546,7 +557,7 @@ func main() {
 	if *nonInteractive {
 		if flag.NArg() == 0 {
 			fmt.Println("Usage with --run: eling --run \"your prompt\"")
-			os.Exit(1)
+			exitWithCleanup(ag, 1)
 		}
 		prompt := flag.Arg(0)
 		logger.Global().Info("Non-interactive mode: query length=%d", len(prompt))
@@ -559,7 +570,7 @@ func main() {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			logger.Global().Error("Non-interactive query failed: %v", err)
-			os.Exit(1)
+			exitWithCleanup(ag, 1)
 		}
 		fmt.Println(response)
 		_ = ag.SaveState()
