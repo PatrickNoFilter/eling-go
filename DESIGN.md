@@ -92,6 +92,15 @@
 - Dynamic tool discovery from MCP servers
 - `mcpskill` tool for managing connections from conversation
 
+### 7b. HTTP Daemon (internal/server/)
+- `eling serve` — long-running agent over HTTP+SSE (Phase 4)
+- Endpoints: `GET /v1/health`, `GET /v1/sessions`, `GET /v1/sessions/{id}`, `POST /v1/chat`
+- One `*agent.Agent` per `session_id` (mutex-guarded map), wraps `Agent.AskStream`
+- SSE events: `session`, `message` (delta), `tool_call`, `done`, `error`
+- Bearer-token auth when `server.token` set; loopback-only default (Termux-safe)
+- Graceful shutdown (SIGINT/SIGTERM) saves all live sessions via `Server.Shutdown`
+- CLI: `eling serve --addr <addr> --token <token>`
+
 ### 8. Session Management (internal/session/)
 - Named sessions with save/resume
 - Auto-save every 5 minutes

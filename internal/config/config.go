@@ -18,6 +18,7 @@ type Config struct {
 	MCP     MCPConfig     `yaml:"mcp"`
 	LSP     LSPConfig     `yaml:"lsp"`
 	Session SessionConfig `yaml:"session"`
+	Server  ServerConfig  `yaml:"server"`
 }
 
 // AgentConfig configures the AI agent.
@@ -96,6 +97,13 @@ type SessionConfig struct {
 	SaveDir  string `yaml:"save_dir"`
 }
 
+// ServerConfig configures the HTTP daemon (`eling serve`, Phase 4).
+type ServerConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Addr    string `yaml:"addr"`  // default 127.0.0.1:8765 (loopback only)
+	Token   string `yaml:"token"` // Bearer token; empty = loopback-only, no auth
+}
+
 // DefaultConfig returns the default configuration.
 func DefaultConfig() *Config {
 	homeDir, _ := os.UserHomeDir()
@@ -157,6 +165,10 @@ func DefaultConfig() *Config {
 		Session: SessionConfig{
 			AutoSave: true,
 			SaveDir:  filepath.Join(homeDir, ".eling", "sessions"),
+		},
+		Server: ServerConfig{
+			Enabled: false,
+			Addr:    "127.0.0.1:8765", // loopback only by default (Termux-safe)
 		},
 	}
 }

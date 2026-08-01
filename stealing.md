@@ -113,7 +113,7 @@ persistence, plan re-injection via system message. 5 dedicated tests pass
 **Goal:** After the agent edits a file, run language-server diagnostics and feed them back
 before the model continues.
 
-**Status:** Implemented & committed (`feat: lsp integration`, v0.2.4). New `internal/lsp`
+**Status:** Implemented & committed (`91890e8 feat: lsp integration`, v0.2.4). New `internal/lsp`
 package (minimal JSON-RPC 2.0 LSP client over stdio, Content-Length framed), wired into
 both tool loops after `HookPostToolUse`. `write`/`edit` results gain a compact `[lsp]`
 section (file:line:col SEV: message, capped at 20). `lsp.KillAll()` mirrors
@@ -145,10 +145,17 @@ section (file:line:col SEV: message, capped at 20). `lsp.KillAll()` mirrors
 
 ---
 
-### PHASE 4 — Daemon/ACP Mode  `[multi-client agent]`
+### PHASE 4 — Daemon/ACP Mode  `[✅ DONE 2026-08-01 v0.2.5]`
 
 **Goal:** `eling serve` — long-running agent accessible over HTTP+SSE so any client
 (TUI, curl, another device) can talk to it.
+
+**Status:** Implemented & committed (`feat: eling serve daemon`, v0.2.5). New
+`internal/server` package (316 LOC: Server, auth, health/sessions/chat handlers,
+SSE streaming), `cmdServe` in `internal/cli/cli.go` with `--addr`/`--token` flags
+and graceful SIGINT/SIGTERM shutdown (saves all sessions), `ServerConfig`
+(`server.enabled/addr/token`) in config, `Agent.SessionName()` accessor, and
+6 new tests (health, 401 auth, SSE chat stream, session continuity, 400s, 404).
 
 **Design:**
 
@@ -167,10 +174,10 @@ section (file:line:col SEV: message, capped at 20). `lsp.KillAll()` mirrors
 `internal/config/*`, `internal/session/session.go`.
 
 **Acceptance:**
-- [ ] `curl -N -X POST http://127.0.0.1:8765/v1/chat -d '{"prompt":"hi"}'` streams a reply
-- [ ] Two sequential chats to same session_id continue the conversation
-- [ ] Wrong token → 401
-- [ ] `go test -race ./internal/server/...` clean
+- [x] `curl -N -X POST http://127.0.0.1:8765/v1/chat -d '{"prompt":"hi"}'` streams a reply
+- [x] Two sequential chats to same session_id continue the conversation
+- [x] Wrong token → 401
+- [x] `go test -race ./internal/server/...` clean (6 tests pass)
 
 **Effort:** M (1–2 days) · **Risk:** medium (concurrency, SSE framing)
 
@@ -214,7 +221,7 @@ hook model on top of ELING's internal `fireHook` system.
 | 1 | Git Worktrees + Sandbox | M | 3rd (needs stability) | `feat: sandbox + git worktrees` |
 | 2 | Plan Mode | S | **1st** ⚡ quick win | `feat: plan mode gating` ✅ **v0.2.3 (2026-08-01)** |
 | 3 | LSP Integration | M | 2nd | `feat: lsp diagnostics feedback` |
-| 4 | Daemon/ACP Mode | M | 4th | `feat: eling serve daemon` |
+| 4 | Daemon/ACP Mode | M | 4th | `feat: eling serve daemon` ✅ **v0.2.5 (2026-08-01)** |
 | 5 | User-Defined Hooks | S–M | 5th (leverages existing system) | `feat: user-defined hooks` |
 
 **Suggested sprint:** Phase 2 → 3 → 1 → 4 → 5 (quick wins first, big-ticket items

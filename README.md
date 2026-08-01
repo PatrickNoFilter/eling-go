@@ -232,7 +232,39 @@ Or configure via command line:
 # Plan Mode (draft + approve before tools execute)
 ./eling --plan "deploy the service"               # Draft a plan, wait for approval, then execute
 ./eling --plan                                    # Enable plan mode for the whole session
+
+# Daemon Mode (HTTP+SSE — multi-client agent, Phase 4)
+./eling serve                                     # Listen on 127.0.0.1:8765 (config server.addr)
+./eling serve --addr 0.0.0.0:8765 --token "sk-.." # LAN mode with Bearer auth
 ```
+
+### Daemon Mode (`eling serve`)
+
+Exposes the ELING agent as a long-running HTTP+SSE daemon so any client — the TUI,
+`curl`, or another device on the LAN — can talk to the same brain.
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /v1/health` | version, providers, tools, mcp_servers, active sessions |
+| `GET /v1/sessions` | list live session ids |
+| `GET /v1/sessions/{id}` | session entries |
+| `POST /v1/chat` | `{"session_id":"?","prompt":"..."}` → SSE stream (`session`/`message`/`tool_call`/`done`/`error`) |
+
+```bash
+# stream a reply
+curl -N -X POST http://127.0.0.1:8765/v1/chat \
+  -H 'Authorization: Bearer <token>' \
+  -d '{"prompt":"hi"}'
+
+# continue the same conversation (same session_id keeps one in-memory agent)
+curl -N -X POST http://127.0.0.1:8765/v1/chat \
+  -H 'Authorization: Bearer <token>' \
+  -d '{"session_id":"sess-1","prompt":"and now?"}'
+```
+
+- **Auth:** `Authorization: Bearer <token>` when `server.token` is set; empty token = loopback-only (Termux-safe default)
+- **Shutdown:** `Ctrl+C`/SIGTERM saves all live sessions before stopping
+- **Config:** `server.enabled`, `server.addr` (default `127.0.0.1:8765`), `server.token`
 
 ### TUI Commands
 

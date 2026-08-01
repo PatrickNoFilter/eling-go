@@ -1821,6 +1821,13 @@ func (a *Agent) GetLastSession() (*session.Session, error) {
 	return a.Sessions.GetLastSession()
 }
 
+// SessionName returns the current session's name.
+func (a *Agent) SessionName() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.sessionName
+}
+
 // SetSessionName renames the current session to a meaningful name.
 func (a *Agent) SetSessionName(name string) error {
 	a.mu.Lock()

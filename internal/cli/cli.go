@@ -9,17 +9,22 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
+	"eling/internal/agent"
 	"eling/internal/config"
 	"eling/internal/layers"
+	"eling/internal/server"
 )
 
 // RunCLI dispatches the appropriate subcommand based on args.
+// version is the eling version string (used by `eling serve` health endpoint).
 // Returns true if a CLI command was handled (caller should os.Exit).
-func RunCLI(cfg *config.Config, args []string) bool {
+func RunCLI(cfg *config.Config, version string, args []string) bool {
 	if len(args) < 1 {
 		return false
 	}
@@ -28,6 +33,8 @@ func RunCLI(cfg *config.Config, args []string) bool {
 	subArgs := args[1:]
 
 	switch cmd {
+	case "serve":
+		return cmdServe(cfg, version, subArgs)
 	case "remember":
 		return cmdRemember(cfg, subArgs)
 	case "recall":
@@ -185,6 +192,87 @@ func OpenBrain(cfg *config.Config) (*layers.Brain, error) {
 	brain.RegisterDefaultHooks()
 
 	return brain, nil
+}
+
+// ── Daemon Commands (Phase 4: eling serve) ─────────────────────────────────
+
+// cmdServe runs the ELING HTTP+SSE daemon (`eling serve`, Phase 4 of the
+// qwen-code feature steal). It exposes the agent over HTTP so any client
+// (curl, TUI via --daemon-url, another device on the LAN) can talk to the
+// same brain. Graceful shutdown on SIGINT/SIGTERM saves all session state.
+//
+// Flags:
+//
+//	--addr  127.0.0.1:8765   listen address (overrides config server.addr)
+//	--token <bearer>         auth token (overrides config server.token)
+//	--help                   usage
+func cmdServe(cfg *config.Config, version string, args []string) bool {
+	addr := cfg.Server.Addr
+	token := cfg.Server.Token
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--addr", "-a":
+			if i+1 < len(args) {
+				addr = args[i+1]
+				i++
+			}
+		case "--token", "-t":
+			if i+1 < len(args) {
+				token = args[i+1]
+				i++
+			}
+		case "--help", "-h":
+			fmt.Println("usage: eling serve [--addr 127.0.0.1:8765] [--token <bearer>]")
+			fmt.Println()
+			fmt.Println("Runs the ELING agent as an HTTP+SSE daemon (Phase 4).")
+			fmt.Println()
+			fmt.Println("Endpoints:")
+			fmt.Println("  GET  /v1/health           version, providers, tools, mcp_servers")
+			fmt.Println("  GET  /v1/sessions          list live session ids")
+			fmt.Println("  GET  /v1/sessions/{id}     session entries")
+			fmt.Println("  POST /v1/chat              {session_id?, prompt} -> SSE stream")
+			fmt.Println()
+			fmt.Println("Example:")
+			fmt.Println("  curl -N -X POST http://127.0.0.1:8765/v1/chat \\")
+			fmt.Println("    -H 'Authorization: Bearer <token>' \\")
+			fmt.Println("    -d '{\"prompt\":\"hi\"}'")
+			return true
+		}
+	}
+
+	// apply overrides onto the config the server will read
+	if addr != "" {
+		cfg.Server.Addr = addr
+	}
+	if token != "" {
+		cfg.Server.Token = token
+	}
+
+	srv := server.NewServer(cfg, version, agent.New)
+
+	// graceful shutdown: save all sessions, then stop the http server
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve("") }()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		}
+	case <-ctx.Done():
+		fmt.Println("\n⏳ shutting down daemon (saving sessions)…")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "shutdown error: %v\n", err)
+		} else {
+			fmt.Println("✅ daemon stopped, sessions saved.")
+		}
+	}
+	return true
 }
 
 // ── Core Memory Commands ──────────────────────────────────────────────────

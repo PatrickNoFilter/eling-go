@@ -157,7 +157,7 @@ func recoverWithStack(ag *agent.Agent) {
 	}
 }
 
-const Version = "0.2.4"
+const Version = "0.2.5"
 
 func main() {
 	apiKey := flag.String("api-key", "", "DeepSeek API key (or set DEEPSEEK_API_KEY env var)")
@@ -213,7 +213,7 @@ func main() {
 				// Create a default config if none exists
 				cfg = config.DefaultConfig()
 			}
-			if cli.RunCLI(cfg, flag.Args()) {
+			if cli.RunCLI(cfg, Version, flag.Args()) {
 				os.Exit(0)
 			}
 			// If RunCLI returns false, fall through to normal agent mode
