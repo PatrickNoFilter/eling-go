@@ -85,6 +85,7 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 - **Active tool tracking**: See running commands with live timers
 - **Scrollable history**: Viewport with pgup/pgdn
 - **Paste-safe input**: Multi-line pastes are held in the input box — newlines never auto-send (bracketed-paste + burst detection)
+- **Plan Mode UI**: Drafted plans render as a checklist with **y = approve / n = reject / Esc = skip** (no tools run before approval)
 - **Session-aware**: Displays current session, token usage, memory stats
 
 ### 📋 Session Management
@@ -226,6 +227,10 @@ Or configure via command line:
 
 # Config
 ./eling --config /path/to/config.yaml             # Use custom config
+
+# Plan Mode (draft + approve before tools execute)
+./eling --plan "deploy the service"               # Draft a plan, wait for approval, then execute
+./eling --plan                                    # Enable plan mode for the whole session
 ```
 
 ### TUI Commands
@@ -244,6 +249,7 @@ Or configure via command line:
 | `/resume <name>` | Resume a saved session |
 | `/providers` | List configured providers |
 | `/provider <name>` | Switch to a different provider |
+| `/plan` | Toggle plan mode (draft + approve before tools execute) |
 | `/mcp` | Show MCP server status |
 | `/mcp_connect <name> <cmd>` | Connect an MCP server |
 | `/evolve` | Trigger evolution/self-improvement |

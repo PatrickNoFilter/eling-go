@@ -47,6 +47,7 @@ var (
 	timerFailSty = lipgloss.NewStyle().Foreground(lipgloss.Color("#F38BA8"))              // red for failure timer
 	reasonSty    = lipgloss.NewStyle().Foreground(lipgloss.Color("#89B4FA")).Italic(true) // blue italic for reasoning
 	resultSty    = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))              // white for tool results
+	planSty      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#CBA6F7"))   // lavender bold for plan header
 	diffAddSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6E3A1"))              // green for added lines
 	diffDelSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F38BA8"))              // red for deleted lines
 	diffHdrSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#89B4FA"))              // blue for diff header
@@ -60,6 +61,10 @@ type clockTick struct{}
 
 type respMsg string
 type errMsg string
+
+// planMsg carries a drafted execution plan from the Ask goroutine so the
+// TUI can render it as a checklist and prompt for y/N/Esc approval.
+type planMsg string
 
 // toolCallMsg is sent from the Ask goroutine to signal a tool invocation.
 type toolCallMsg agent.ToolCallEvent
@@ -109,6 +114,8 @@ type Model struct {
 	pasteBurst      int                // consecutive keys arriving within pasteBurstWindow
 	pasting         bool               // true while a paste burst is active; Enter inserts newline instead of submitting
 	pasteUntil      time.Time          // pasting stays true until this time
+	awaitingPlan    bool               // true while a drafted plan is waiting for y/N/Esc approval
+	planCh          chan agent.PlanVerdict // receives the user's plan verdict (non-nil only while awaitingPlan)
 }
 
 // NewProgram creates a new Bubbletea program with the given agent and timezone location.
@@ -395,6 +402,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp.SetContent(strings.Join(m.messages, "\n"))
 
 	case tea.KeyMsg:
+		// While a drafted plan is awaiting approval, intercept y/N/Enter/Esc.
+		// The Ask goroutine is blocked on planCh until the user decides.
+		if m.awaitingPlan {
+			var verdict agent.PlanVerdict = -1
+			switch v.Type {
+			case tea.KeyEnter:
+				verdict = agent.PlanApprove
+			case tea.KeyEsc:
+				verdict = agent.PlanSkip
+			case tea.KeyCtrlC:
+				verdict = agent.PlanReject
+				if m.cancel != nil {
+					m.cancel()
+				}
+			case tea.KeyRunes:
+				s := strings.ToLower(string(v.Runes))
+				switch s {
+				case "y", "yes":
+					verdict = agent.PlanApprove
+				case "n", "no":
+					verdict = agent.PlanReject
+				}
+			}
+			if verdict >= 0 {
+				m.awaitingPlan = false
+				ch := m.planCh
+				m.planCh = nil
+				if ch != nil {
+					select {
+					case ch <- verdict:
+					default:
+					}
+				}
+			}
+			return m, nil
+		}
+
 		// Scroll keys work even during loading
 		if m.loading {
 			if v.Type == tea.KeyCtrlC && m.cancel != nil {
@@ -690,9 +734,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, listenForMsg(m.msgCh)
 
+	case planMsg:
+		// A plan draft is ready — render it as a checklist and wait for
+		// the user's y/N/Esc verdict (the Ask goroutine is blocked meanwhile).
+		m.awaitingPlan = true
+		plan := strings.TrimSpace(string(v))
+		m.messages = append(m.messages, "", planSty.Render("📋 Proposed plan — approve to execute:"))
+		for _, line := range strings.Split(plan, "\n") {
+			if line == "" {
+				continue
+			}
+			m.messages = append(m.messages, txtSty.Render("  " + line))
+		}
+		m.messages = append(m.messages, infSty.Render("  [y] approve   [n] reject   [Esc] skip plan mode"))
+		if m.ready {
+			wasAtBottom := m.vp.ScrollPercent() >= 0.99
+			m.vp.SetContent(strings.Join(m.messages, "\n"))
+			if wasAtBottom {
+				m.vp.GotoBottom()
+			}
+		}
+		return m, nil
+
 	case respMsg:
 		m.loading = false
 		m.cancel = nil // reset cancel function
+		m.awaitingPlan = false
+		m.planCh = nil
 		// Remove the thinking line cleanly
 		m.messages = removeLine(m.messages, m.thinkingIdx)
 		m.thinkingIdx = -1
@@ -711,6 +779,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.loading = false
 		m.cancel = nil // reset cancel function
+		m.awaitingPlan = false
+		m.planCh = nil
 		m.messages = removeLine(m.messages, m.thinkingIdx)
 		m.thinkingIdx = -1
 		elapsed := time.Since(m.startTime)
@@ -792,6 +862,29 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	// Create a cancellable context for interrupt support
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
+
+	// Plan mode: attach an interactive approver so the Ask goroutine can
+	// pause with a drafted plan and wait for the user's y/N/Esc verdict.
+	if ag.PlanEnabled {
+		planCh := make(chan agent.PlanVerdict, 1)
+		m.planCh = planCh
+		m.awaitingPlan = false
+		ag.PlanApprover = func(plan string) agent.PlanVerdict {
+			select {
+			case msgCh <- genMsg{gen: myGen, msg: planMsg(plan)}:
+			case <-ctx.Done():
+				return agent.PlanReject
+			}
+			select {
+			case v := <-planCh:
+				return v
+			case <-ctx.Done():
+				return agent.PlanReject
+			}
+		}
+	} else {
+		ag.PlanApprover = nil
+	}
 
 	// Start a goroutine that sends tool-call events and the final response
 	// through the shared channel. The Bubbletea loop reads one message at a
@@ -901,6 +994,7 @@ func (m Model) cmd(c string) (tea.Model, tea.Cmd) {
   /add tool|plugin|skill|mcp ...
   /tokens    /mcp       /mcp_connect <name> <cmd...>
   /providers /provider <name>
+  /plan      (toggle plan mode: draft + approve before tools)
   /evolve
 
   Enter=submit  Alt+Enter=newline  paste w/ newlines=held  /run=submit`[1:]))
@@ -1198,6 +1292,25 @@ func (m Model) cmd(c string) (tea.Model, tea.Cmd) {
 				desc := agent.TruncateStr(sk.Description, 60)
 				m.messages = append(m.messages, infSty.Render(fmt.Sprintf("  - %s: %s", sk.Name, desc)))
 			}
+		}
+
+	// --- /plan [on|off] - toggle plan mode ---
+	case "/plan":
+		on := strings.ToLower(strings.Join(pts[1:], " "))
+		switch on {
+		case "on", "1", "yes":
+			m.agent.PlanEnabled = true
+			m.messages = append(m.messages, infSty.Render("  plan mode: ON — drafts a plan for approval each turn ([y]/[n]/[Esc])"))
+		case "off", "0", "no":
+			m.agent.PlanEnabled = false
+			m.messages = append(m.messages, infSty.Render("  plan mode: OFF"))
+		default:
+			m.agent.PlanEnabled = !m.agent.PlanEnabled
+			state := "OFF"
+			if m.agent.PlanEnabled {
+				state = "ON"
+			}
+			m.messages = append(m.messages, infSty.Render(fmt.Sprintf("  plan mode: %s", state)))
 		}
 
 	// --- /evolve - trigger evolution cycle ---

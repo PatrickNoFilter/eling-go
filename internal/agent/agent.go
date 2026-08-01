@@ -73,6 +73,18 @@ type TurnTimeoutRecord struct {
 	Timestamp      time.Time     `json:"timestamp"`
 }
 
+// PlanVerdict is the user's decision on a drafted plan (plan mode).
+type PlanVerdict int
+
+const (
+	// PlanApprove accepts the plan and proceeds with tools enabled.
+	PlanApprove PlanVerdict = iota
+	// PlanReject aborts the turn without executing any tools.
+	PlanReject
+	// PlanSkip bypasses plan gating for this turn (Esc in the TUI).
+	PlanSkip
+)
+
 // Agent is the core auto-learning AI agent, inspired by jcode's architecture.
 type Agent struct {
 	mu  sync.RWMutex
@@ -106,6 +118,12 @@ type Agent struct {
 	// State
 	stateDir    string
 	sessionName string
+
+	// Plan mode (Qwen-code steal, Phase 2): when enabled, Ask() drafts a plan
+	// with tools stripped and waits for user approval before executing tools.
+	// PlanApprover is the approval callback (set by the TUI); nil = auto-approve.
+	PlanEnabled  bool
+	PlanApprover func(plan string) PlanVerdict
 
 	// Turn timeout history for self-adaptive timeout prediction
 	turnTimeoutMu   sync.RWMutex
@@ -294,6 +312,32 @@ func (a *Agent) fireHook(hookName string, ctx map[string]interface{}) {
 	a.Brain.FireHook(hookName, ctx)
 }
 
+// draftPlan asks the LLM — with tools stripped and a plan-only system suffix —
+// to produce a numbered execution plan for the current prompt, then asks the
+// user for a verdict via PlanApprover (nil = auto-approve, used by the CLI).
+func (a *Agent) draftPlan(ctx context.Context, prov *provider.Provider, messages []provider.Message, maxDuration int, callbacks ...func(ToolCallEvent)) (PlanVerdict, string, error) {
+	planMessages := make([]provider.Message, len(messages)+1)
+	copy(planMessages, messages)
+	planMessages[len(messages)] = provider.Message{
+		Role: "system",
+		Content: "Respond ONLY with a numbered execution plan for the user's request. " +
+			"No code. No tool calls. No preamble. Format exactly:\n" +
+			"1. Step one\n2. Step two\n...",
+	}
+
+	planText, _, err := a.runToolLoop(ctx, prov, planMessages, nil, maxDuration, callbacks...)
+	if err != nil {
+		return PlanReject, "", err
+	}
+	planText = strings.TrimSpace(planText)
+
+	verdict := PlanApprove
+	if a.PlanApprover != nil {
+		verdict = a.PlanApprover(planText)
+	}
+	return verdict, planText, nil
+}
+
 // Ask sends a prompt to the LLM, executing any tool calls the model makes
 // along the way, and returns the final text response.
 // If onToolCall is not nil, it is invoked synchronously for each tool invocation.
@@ -302,6 +346,14 @@ func (a *Agent) fireHook(hookName string, ctx map[string]interface{}) {
 func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolCallEvent)) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	// Plan mode: clear any stale plan from a previous turn so buildMessages
+	// doesn't inject an outdated plan into the new context.
+	if a.PlanEnabled {
+		if s, ok := a.Sessions.Get(a.sessionName); ok && s.Plan != "" {
+			s.Plan = ""
+		}
 	}
 
 	// Build context and messages under read lock (fast)
@@ -342,6 +394,32 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 		// Use the larger of configured and predicted
 		if configuredDuration <= 0 || predictedDuration > configuredDuration {
 			currentDuration = predictedDuration
+		}
+	}
+
+	// PLAN MODE: draft a numbered plan with tools stripped, then ask the user
+	// to approve / reject / skip it before any tool executes.
+	if a.PlanEnabled {
+		verdict, planText, planErr := a.draftPlan(ctx, prov, messages, currentDuration, callbacks...)
+		if planErr != nil {
+			return "", fmt.Errorf("plan drafting failed: %w", planErr)
+		}
+		switch verdict {
+		case PlanReject:
+			return "❌ Plan rejected — no tools were executed.", nil
+		case PlanSkip:
+			// Skip plan gating for this turn; continue straight to execution.
+			log.Printf("[plan] user skipped plan mode for this turn")
+		case PlanApprove:
+			// Persist the approved plan on the session (shows in saved JSON).
+			if s, ok := a.Sessions.Get(a.sessionName); ok {
+				s.Plan = planText
+			}
+			// Rebuild messages so buildMessages injects the approved plan
+			// into the execution context (tools stay enabled).
+			a.mu.RLock()
+			messages = a.buildMessages(contextPrompt)
+			a.mu.RUnlock()
 		}
 	}
 
@@ -2124,6 +2202,16 @@ Always be helpful, precise, and proactive. Think step by step.`
 			Content: "[Conversation context so far: " + a.conversationSummary + "]",
 		}
 		messages = append(messages, summaryMsg)
+	}
+
+	// Inject the most recently approved execution plan (plan mode) so the
+	// model follows it step by step during execution. Cleared at the start
+	// of each Ask() turn when plan mode is enabled.
+	if s, ok := a.Sessions.Get(a.sessionName); ok && s.Plan != "" {
+		messages = append(messages, provider.Message{
+			Role:    "system",
+			Content: "[Approved execution plan — follow it step by step]:\n" + s.Plan,
+		})
 	}
 
 	// Calculate token budget.

@@ -157,7 +157,7 @@ func recoverWithStack(ag *agent.Agent) {
 	}
 }
 
-const Version = "0.2.2"
+const Version = "0.2.3"
 
 func main() {
 	apiKey := flag.String("api-key", "", "DeepSeek API key (or set DEEPSEEK_API_KEY env var)")
@@ -176,6 +176,7 @@ func main() {
 	markdownifyMode := flag.Bool("markdownify", false, "Start markdownify HTTP server for document-to-Markdown conversion")
 	markdownifyAddr := flag.String("markdownify-addr", ":8080", "Address for markdownify HTTP server")
 	showVersion := flag.Bool("version", false, "Print version and exit")
+	planMode := flag.Bool("plan", false, "Plan mode: draft a plan and require approval before executing tools")
 	flag.Parse()
 
 	if *showVersion {
@@ -367,6 +368,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
+
+	// Plan mode: CLI flag overrides config; enables the draft-then-approve
+	// gate. The TUI attaches an interactive PlanApprover per submit; the
+	// non-interactive CLI auto-approves (nil approver).
+	ag.PlanEnabled = *planMode || cfg.Agent.PlanMode
 
 	// Initialize the 8-layer memory Brain and attach it to the agent.
 	// This enables all 15 lifecycle hooks during conversation.
@@ -614,6 +620,7 @@ func main() {
 					fmt.Println("  /skills    - List learned skills")
 					fmt.Println("  /memory    - Show recent memories")
 					fmt.Println("  /recall <q>- Search memories")
+					fmt.Println("  /plan      - Toggle plan mode (draft + approve before tools)")
 					fmt.Println("  /save      - Save state")
 					fmt.Println("  /session   - Show session info")
 					fmt.Println("  /providers - List providers")
@@ -654,6 +661,19 @@ func main() {
 						for _, it := range ag.GetMemory().Recall(q) {
 							fmt.Printf("  [%s] %s\n", it.Category, agent.TruncateStr(it.Content, 80))
 						}
+					}
+				case "/plan":
+					on := strings.ToLower(strings.Join(parts[1:], " "))
+					switch on {
+					case "on", "1", "yes":
+						ag.PlanEnabled = true
+						fmt.Println("  plan mode: ON (drafts a plan for approval each turn; auto-approves in REPL)")
+					case "off", "0", "no":
+						ag.PlanEnabled = false
+						fmt.Println("  plan mode: OFF")
+					default:
+						ag.PlanEnabled = !ag.PlanEnabled
+						fmt.Printf("  plan mode: %v\n", map[bool]string{true: "ON", false: "OFF"}[ag.PlanEnabled])
 					}
 				case "/save":
 					if err := ag.SaveState(); err != nil {

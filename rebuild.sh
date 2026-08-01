@@ -14,7 +14,8 @@ echo "🔨 Building ELING..."
 TMP_BIN=".eling.build.$$"
 trap 'rm -f "$TMP_BIN"' EXIT
 
-if go build -o "$TMP_BIN" . 2>&1; then
+# -ldflags "-s -w" strips DWARF debug info → ~3-4× faster link, smaller binary
+if go build -ldflags "-s -w" -o "$TMP_BIN" . 2>&1; then
     # Atomic rename — instant on Linux, safe on overlayfs/proot
     # mv replaces the inode without affecting the running process
     mv -f "$TMP_BIN" ./eling

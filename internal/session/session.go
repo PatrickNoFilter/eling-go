@@ -40,6 +40,10 @@ type Session struct {
 	Model     string            `json:"model"`
 	Entries   []Entry           `json:"entries"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+	// Plan holds the most recently approved execution plan (plan mode).
+	// Persisted so saved/resumed sessions show the plan and re-inject it
+	// into the model context on resume.
+	Plan string `json:"plan,omitempty"`
 }
 
 // Manager handles session persistence.

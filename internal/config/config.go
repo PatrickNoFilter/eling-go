@@ -31,6 +31,7 @@ type AgentConfig struct {
 	AutoTest               bool             `yaml:"auto_test"`                 // from Python: auto-run go test on touched test files
 	LearnFromExchange      bool             `yaml:"learn_from_exchange"`       // from Python: LLM-based skill learning
 	SaveConversation       bool             `yaml:"save_conversation"`         // save every conversation turn to semantic index
+	PlanMode               bool             `yaml:"plan_mode"`                 // plan mode: draft a plan + get approval before executing tools
 	Providers              []ProviderConfig `yaml:"providers"`
 }
 
