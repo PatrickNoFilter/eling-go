@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"eling/internal/config"
+	"eling/internal/hooks"
 	"eling/internal/layers"
 	"eling/internal/lsp"
 	"eling/internal/mcp"
@@ -141,6 +142,21 @@ type Agent struct {
 	// resumed conversations can pass reasoning_content back to the API —
 	// DeepSeek rejects assistant messages that omit it in thinking mode.
 	lastReasoning atomic.Value // string
+
+	// autoTestCache memoizes autoTest results per package-dir signature so
+	// consecutive tool rounds touching the same files don't re-run `go test`
+	// (the old behavior made every round slow — the "it takes very long time"
+	// complaint). Key: sorted package-arg list joined by "|"; value: outcome.
+	autoTestMu    sync.Mutex
+	autoTestCache map[string]autoTestOutcome
+	autoTestLast  time.Time
+}
+
+// autoTestOutcome records the result of a memoized autoTest run.
+type autoTestOutcome struct {
+	Passed    bool      // true = all tests passed
+	FailText  string    // failure summary when !Passed
+	Timestamp time.Time // when the run happened
 }
 
 // New creates a new Agent with all subsystems initialized.
@@ -222,6 +238,7 @@ func New(cfg *config.Config) (*Agent, error) {
 		stateDir:        stateDir,
 		sessionName:     fmt.Sprintf("session_%d", time.Now().Unix()),
 		turnTimeoutHist: make([]TurnTimeoutRecord, 0),
+		autoTestCache:   make(map[string]autoTestOutcome),
 	}
 
 	// Create a default session
@@ -295,6 +312,12 @@ func (a *Agent) SetBrain(brain *layers.Brain) {
 
 	// Register all 15 default lifecycle hooks on this Brain
 	brain.RegisterDefaultHooks()
+	// Phase 5: register user-defined shell-script hooks from config.yaml.
+	// Each script gets a layers.HookHandler; pre_tool_use scripts can veto
+	// tool calls via {"block":true,"reason":"..."} on stdout.
+	if a.cfg != nil {
+		hooks.RegisterUserHooks(brain, a.cfg.Hooks.Scripts)
+	}
 	// Fire session-start hook with agent metadata
 	brain.FireHook(layers.HookSessionStart, map[string]interface{}{
 		"agent":       "eling-go",
@@ -305,16 +328,18 @@ func (a *Agent) SetBrain(brain *layers.Brain) {
 
 // fireHook fires a lifecycle hook on the Brain, if available.
 // Context values are passed as a map; nil is safe.
-func (a *Agent) fireHook(hookName string, ctx map[string]interface{}) {
+// Returns the hook results (nil if Brain is nil or no handlers fired) so
+// callers can inspect vetoes (see hooks.CheckVeto).
+func (a *Agent) fireHook(hookName string, ctx map[string]interface{}) []interface{} {
 	if a.Brain == nil {
-		return
+		return nil
 	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[agent] hook %q panicked: %v (caught)", hookName, r)
 		}
 	}()
-	a.Brain.FireHook(hookName, ctx)
+	return a.Brain.FireHook(hookName, ctx)
 }
 
 // draftPlan asks the LLM — with tools stripped and a plan-only system suffix —
@@ -730,12 +755,22 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 			}
 
 			// Fire pre-tool-use hook before execution
-			a.fireHook(layers.HookPreToolUse, map[string]interface{}{
+			hookResults := a.fireHook(layers.HookPreToolUse, map[string]interface{}{
 				"tool_name": tc.Function.Name,
 				"arguments": tc.Function.Arguments,
 			})
 
-			result, execErr := a.ToolRegistry.Execute(tc.Function.Name, args)
+			// Phase 5: user-defined pre_tool_use hooks can veto the call.
+			var result interface{}
+			var execErr error
+			if blocked, reason := hooks.CheckVeto(hookResults); blocked {
+				result = map[string]interface{}{
+					"blocked": true,
+					"reason":  reason,
+				}
+			} else {
+				result, execErr = a.ToolRegistry.Execute(tc.Function.Name, args)
+			}
 			a.incrementSkillUsedCount(tc.Function.Name)
 			var resultText string
 			if execErr != nil {
@@ -1469,12 +1504,22 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 			}
 
 			// Fire pre-tool-use hook before execution
-			a.fireHook(layers.HookPreToolUse, map[string]interface{}{
+			hookResults := a.fireHook(layers.HookPreToolUse, map[string]interface{}{
 				"tool_name": tc.Function.Name,
 				"arguments": tc.Function.Arguments,
 			})
 
-			result, execErr := a.ToolRegistry.Execute(tc.Function.Name, args)
+			// Phase 5: user-defined pre_tool_use hooks can veto the call.
+			var result interface{}
+			var execErr error
+			if blocked, reason := hooks.CheckVeto(hookResults); blocked {
+				result = map[string]interface{}{
+					"blocked": true,
+					"reason":  reason,
+				}
+			} else {
+				result, execErr = a.ToolRegistry.Execute(tc.Function.Name, args)
+			}
 			a.incrementSkillUsedCount(tc.Function.Name)
 			var resultText string
 			if execErr != nil {
@@ -2823,6 +2868,12 @@ func normalizeToolCallIDs(calls []provider.ToolCall, base int) []provider.ToolCa
 
 // autoTest runs go test on touched test files after tool rounds.
 // Ported from the Python eling-agent's _auto_pytest() function.
+//
+// Performance guard (fixes "it takes very long time"): results are memoized
+// per package-arg signature. If the same set of packages was already tested
+// and passed within the cooldown window, the run is skipped entirely — the
+// old behavior re-ran `go test -count=1` on EVERY tool round even when the
+// files hadn't changed, which made multi-round edits crawl.
 func (a *Agent) autoTest(results []provider.Message) string {
 	if !a.cfg.Agent.AutoTest {
 		return ""
@@ -2865,8 +2916,6 @@ func (a *Agent) autoTest(results []provider.Message) string {
 	}
 	sort.Strings(targets)
 
-	log.Printf("autoTest: running go test on %d file(s)", len(targets))
-
 	// Go rejects `go test <file1> <file2>` when the named files live in
 	// different directories OR mix absolute/relative paths ("named files
 	// must all be in one directory"). Tool results can contain both
@@ -2901,16 +2950,53 @@ func (a *Agent) autoTest(results []provider.Message) string {
 		}
 	}
 	sort.Strings(pkgArgs)
+	sig := strings.Join(pkgArgs, "|")
+
+	// Memoization: if this exact package set already passed recently and the
+	// source files haven't changed since, skip the run (huge speedup for
+	// multi-round edits that touch the same package repeatedly).
+	a.autoTestMu.Lock()
+	cooldown := time.Duration(a.cfg.Agent.AutoTestCooldownSec) * time.Second
+	if cooldown <= 0 {
+		cooldown = 10 * time.Second
+	}
+	if out, ok := a.autoTestCache[sig]; ok {
+		// A PASSED result is reusable while the files are unchanged and we're
+		// inside the cooldown window. A FAILED result is always re-run so the
+		// model gets fresh feedback once it starts fixing the tests.
+		if out.Passed && time.Since(out.Timestamp) < cooldown && filesUnchangedSince(targets, out.Timestamp) {
+			a.autoTestMu.Unlock()
+			return ""
+		}
+	}
+	// Global cooldown: never run go test more often than every N seconds,
+	// regardless of which packages were touched (protects against a tight
+	// write→test→write→test loop hammering the compiler).
+	if time.Since(a.autoTestLast) < cooldown {
+		a.autoTestMu.Unlock()
+		return ""
+	}
+	a.autoTestLast = time.Now()
+	a.autoTestMu.Unlock()
+
+	log.Printf("autoTest: running go test on %d file(s) (pkg %s)", len(targets), sig)
 
 	// Run go test with short mode and verbose only on failures
+	timeout := time.Duration(a.cfg.Agent.AutoTestTimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 180 * time.Second // slow ARM cold builds measured at ~95s
+	}
 	args := append([]string{"test", "-short", "-count=1"}, pkgArgs...)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", args...)
 	output, err := cmd.CombinedOutput()
 
 	if err == nil {
 		log.Printf("autoTest: all passed")
+		a.autoTestMu.Lock()
+		a.autoTestCache[sig] = autoTestOutcome{Passed: true, Timestamp: time.Now()}
+		a.autoTestMu.Unlock()
 		return ""
 	}
 
@@ -2920,9 +3006,42 @@ func (a *Agent) autoTest(results []provider.Message) string {
 	if len([]rune(failSummary)) > 800 {
 		failSummary = string([]rune(failSummary)[:800]) + "\n... [truncated]"
 	}
+	// A context-deadline kill produces empty output and a generic error like
+	// "signal: killed" — report it clearly instead of an empty failure block
+	// (which would confuse the model into thinking the build had no errors).
+	if failSummary == "" {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			failSummary = fmt.Sprintf("go test timed out after %s (device too slow or build too large)", timeout)
+		} else if err != nil {
+			failSummary = fmt.Sprintf("go test failed to run: %v", err)
+		} else {
+			failSummary = "go test exited non-zero with no output"
+		}
+	}
 	log.Printf("autoTest: failures:\n%s", failSummary)
 
+	a.autoTestMu.Lock()
+	a.autoTestCache[sig] = autoTestOutcome{Passed: false, FailText: failSummary, Timestamp: time.Now()}
+	a.autoTestMu.Unlock()
+
 	return fmt.Sprintf("*Auto-test found failures:*\n```\n%s\n```\n*Fix the test(s) above and re-run.*", failSummary)
+}
+
+// filesUnchangedSince reports whether every path in paths has an mtime older
+// than t (i.e. none of the files were modified after the cached run). Missing
+// files count as unchanged (conservative: avoids re-running on transient
+// paths that tool output no longer references).
+func filesUnchangedSince(paths []string, t time.Time) bool {
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if fi.ModTime().After(t) {
+			return false
+		}
+	}
+	return true
 }
 
 // TruncateStr truncates a string to n runes, appending "..." if truncated.

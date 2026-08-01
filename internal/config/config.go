@@ -20,6 +20,7 @@ type Config struct {
 	Session SessionConfig `yaml:"session"`
 	Server  ServerConfig  `yaml:"server"`
 	Sandbox SandboxConfig `yaml:"sandbox"`
+	Hooks   HooksConfig   `yaml:"hooks"`
 }
 
 // AgentConfig configures the AI agent.
@@ -32,6 +33,8 @@ type AgentConfig struct {
 	MaxTurnDuration        int              `yaml:"max_turn_duration"`         // wall-clock timeout per turn (seconds)
 	MaxTurnDurationRetries int              `yaml:"max_turn_duration_retries"` // max retries on timeout (self-adaptive)
 	AutoTest               bool             `yaml:"auto_test"`                 // from Python: auto-run go test on touched test files
+	AutoTestTimeoutSec     int              `yaml:"auto_test_timeout_sec"`      // per-run go test timeout (0 = default 45s)
+	AutoTestCooldownSec    int              `yaml:"auto_test_cooldown_sec"`     // min seconds between runs (0 = default 10s)
 	LearnFromExchange      bool             `yaml:"learn_from_exchange"`       // from Python: LLM-based skill learning
 	SaveConversation       bool             `yaml:"save_conversation"`         // save every conversation turn to semantic index
 	PlanMode               bool             `yaml:"plan_mode"`                 // plan mode: draft a plan + get approval before executing tools
@@ -110,11 +113,20 @@ type ServerConfig struct {
 // environment and a destructive-command guard. Real-tree operations require
 // the explicit `allow_host: true` opt-in arg on the bash tool.
 type SandboxConfig struct {
-	Enabled  bool   `yaml:"enabled"`            // default true in Termux root env
-	Root     string `yaml:"root"`               // sandbox root dir, e.g. ~/.eling/sandbox
-	MaxOutput int   `yaml:"max_output"`          // max captured bytes (0 = default 512 KiB)
-	TimeoutSec int  `yaml:"timeout_sec"`         // default bash timeout when unset (0 = default 30s)
-	GuardMode string `yaml:"guard_mode"`         // "block" (default) or "warn" for destructive commands
+	Enabled   bool   `yaml:"enabled"`             // default true in Termux root env
+	Root      string `yaml:"root"`                // sandbox root dir, e.g. ~/.eling/sandbox
+	MaxOutput int    `yaml:"max_output"`          // max captured bytes (0 = default 512 KiB)
+	TimeoutSec int   `yaml:"timeout_sec"`         // default bash timeout when unset (0 = default 30s)
+	GuardMode string `yaml:"guard_mode"`          // "block" (default) or "warn" for destructive commands
+}
+
+// HooksConfig configures user-defined shell-script hooks (Phase 5). Each key
+// is a lifecycle hook name (e.g. "pre_tool_use", "post_tool_use",
+// "error_occurred"); the value is a list of script paths executed in order.
+// Scripts receive the hook context as JSON on stdin and may emit
+// {"block":true,"reason":"..."} on stdout for pre_tool_use to veto a call.
+type HooksConfig struct {
+	Scripts map[string][]string `yaml:"scripts"`
 }
 
 // DefaultConfig returns the default configuration.
@@ -130,6 +142,8 @@ func DefaultConfig() *Config {
 			MaxTurnDuration:        0, // 0 = no wall-clock timeout
 			MaxTurnDurationRetries: 2, // retry up to 2 times on timeout
 			AutoTest:               true,
+			AutoTestTimeoutSec:     180, // per-run go test timeout; slow ARM cold builds measured at ~95s
+			AutoTestCooldownSec:    10, // min seconds between runs (0 = default 10s)
 			LearnFromExchange:      true,
 			SaveConversation:       true,
 			Providers: []ProviderConfig{
@@ -189,6 +203,9 @@ func DefaultConfig() *Config {
 			MaxOutput:  0,   // 0 = default 512 KiB
 			TimeoutSec: 0,   // 0 = default 30s
 			GuardMode:  "block",
+		},
+		Hooks: HooksConfig{
+			Scripts: map[string][]string{}, // no user hooks by default
 		},
 	}
 }
