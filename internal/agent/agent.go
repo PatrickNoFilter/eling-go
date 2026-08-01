@@ -2912,7 +2912,15 @@ func (a *Agent) autoTest(results []provider.Message) string {
 
 	var targets []string
 	for t := range testTargets {
-		targets = append(targets, t)
+		// Normalize to absolute paths so os.Stat (filesUnchangedSince) and
+		// filepath.Abs work correctly regardless of the process CWD — the
+		// agent may be started from /root while the module lives in
+		// /root/eling.
+		abs, err := filepath.Abs(t)
+		if err != nil {
+			abs = t
+		}
+		targets = append(targets, abs)
 	}
 	sort.Strings(targets)
 
@@ -2941,9 +2949,23 @@ func (a *Agent) autoTest(results []provider.Message) string {
 	if cwd == "" {
 		cwd = "."
 	}
+	// Walk up from the touched package dirs to find the Go module root so
+	// `go test` works even when this process was started from another
+	// directory (e.g. /root), which previously produced "go.mod file not
+	// found". Fall back to the process CWD when no go.mod exists.
+	moduleRoot := ""
+	for d := range pkgDirs {
+		if mr := findGoModuleRoot(d); mr != "" {
+			moduleRoot = mr
+			break
+		}
+	}
+	if moduleRoot == "" {
+		moduleRoot = cwd
+	}
 	pkgArgs := make([]string, 0, len(pkgDirs))
 	for d := range pkgDirs {
-		if rel, err := filepath.Rel(cwd, d); err == nil && !strings.HasPrefix(rel, "..") {
+		if rel, err := filepath.Rel(moduleRoot, d); err == nil && !strings.HasPrefix(rel, "..") {
 			pkgArgs = append(pkgArgs, "./"+filepath.ToSlash(rel))
 		} else {
 			pkgArgs = append(pkgArgs, d)
@@ -2990,6 +3012,10 @@ func (a *Agent) autoTest(results []provider.Message) string {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", args...)
+	// Run from the module root — the agent may have been started from
+	// another directory (e.g. /root), which broke `go test` with
+	// "go.mod file not found".
+	cmd.Dir = moduleRoot
 	output, err := cmd.CombinedOutput()
 
 	if err == nil {
@@ -3025,6 +3051,27 @@ func (a *Agent) autoTest(results []provider.Message) string {
 	a.autoTestMu.Unlock()
 
 	return fmt.Sprintf("*Auto-test found failures:*\n```\n%s\n```\n*Fix the test(s) above and re-run.*", failSummary)
+}
+
+// findGoModuleRoot walks up from dir until it finds a go.mod file and
+// returns that directory (the Go module root). Returns "" if none exists.
+// Used by autoTest so `go test` runs from the module root even when this
+// process was started from a different directory (e.g. /root).
+func findGoModuleRoot(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(abs, "go.mod")); err == nil {
+			return abs
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return ""
+		}
+		abs = parent
+	}
 }
 
 // filesUnchangedSince reports whether every path in paths has an mtime older

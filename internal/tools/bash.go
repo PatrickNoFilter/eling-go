@@ -54,16 +54,31 @@ var (
 	runningCmds   []*exec.Cmd
 )
 
-// KillRunningTools kills all currently-running bash subprocesses.
+// KillRunningTools kills all currently-running bash subprocesses and their
+// entire process groups (grandchildren included — a plain Process.Kill only
+// kills the direct child, orphaning `du`/`find`/`go` subprocesses).
 func KillRunningTools() {
 	runningCmdsMu.Lock()
 	defer runningCmdsMu.Unlock()
 	for _, cmd := range runningCmds {
 		if cmd != nil && cmd.Process != nil {
-			_ = cmd.Process.Kill()
+			killProcessGroup(cmd)
 		}
 	}
 	runningCmds = nil
+}
+
+// killProcessGroup sends SIGKILL to the process group rooted at cmd.
+// cmd is started with Setpgid: true, so the group id equals its PID.
+func killProcessGroup(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	pid := cmd.Process.Pid
+	// Negative PID targets the whole process group (including descendants).
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	// Fallback: kill the direct child too (in case group kill failed).
+	_ = cmd.Process.Kill()
 }
 
 func trackCmd(cmd *exec.Cmd) {
@@ -148,6 +163,8 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 		if err := os.MkdirAll(sandboxDir, 0o755); err != nil {
 			return Err("sandbox: create sandbox dir: " + err.Error()), nil
 		}
+		// Opportunistically prune stale sandbox dirs so they don't pile up.
+		cleanupSandbox()
 		if dir == "" {
 			dir = sandboxDir // commands default into the sandbox
 		}
@@ -218,10 +235,9 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 		return OK(result), nil
 
 	case <-timer.C:
-		// Kill the process
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
+		// Kill the entire process group (not just the direct child) so
+		// grandchildren like `du`, `find`, `go` don't keep running.
+		killProcessGroup(cmd)
 		stdoutStr := strings.TrimSpace(stdout.String())
 		stderrStr := strings.TrimSpace(stderr.String())
 		if stdout.Len() >= maxBashOutputBytes {

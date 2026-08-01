@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -90,6 +91,45 @@ func newSandboxDir() string {
 	return filepath.Join(sandboxRoot(), fmt.Sprintf("run-%d-%s", time.Now().Unix(), hex.EncodeToString(b)))
 }
 
+// maxSandboxDirs caps how many per-invocation sandbox dirs are kept before
+// cleanup prunes the oldest ones. Prevents unbounded accumulation of
+// throwaway dirs under ~/.eling/sandbox (which slows du/ls/backups).
+const maxSandboxDirs = 25
+
+// cleanupSandbox prunes old run-* sandbox dirs, keeping only the most
+// recent maxSandboxDirs. Called periodically when creating a new dir.
+func cleanupSandbox() {
+	root := sandboxRoot()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	type dirInfo struct {
+		name string
+		mod  time.Time
+	}
+	var dirs []dirInfo
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "run-") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		dirs = append(dirs, dirInfo{name: e.Name(), mod: info.ModTime()})
+	}
+	if len(dirs) <= maxSandboxDirs {
+		return
+	}
+	// Sort oldest-first and remove the excess oldest entries.
+	sort.Slice(dirs, func(i, j int) bool { return dirs[i].mod.Before(dirs[j].mod) })
+	excess := dirs[:len(dirs)-maxSandboxDirs]
+	for _, d := range excess {
+		_ = os.RemoveAll(filepath.Join(root, d.name))
+	}
+}
+
 // destructivePatterns are regular expressions matched against the raw command
 // string. A match blocks execution (unless GuardMode == "warn", which only
 // annotates the result). These guard the real host tree: /root, /etc, /usr,
@@ -123,13 +163,45 @@ func destructiveCommand(command string) (bool, string) {
 	return false, ""
 }
 
+// realHome returns the host user's home directory (used to share tool
+// caches with the sandbox so Go/npm/pip don't re-download on every call).
+func realHome() string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
+	return "/root"
+}
+
+// toolCacheEnv returns a map of cache env vars that must point at the REAL
+// home (not the throwaway sandbox dir). Without this, every sandboxed
+// `go build`, `go test`, `npm install`, or `pip install` re-downloads and
+// recompiles the entire dependency tree — the #1 cause of "takes forever".
+func toolCacheEnv() map[string]string {
+	home := realHome()
+	return map[string]string{
+		"GOCACHE":         home + "/.cache/go-build",
+		"GOPATH":          home + "/go",
+		"GOMODCACHE":      home + "/go/pkg/mod",
+		"GOTMPDIR":        home + "/.cache/go-tmp",
+		"GOLANGCI_LINT_CACHE": home + "/.cache/golangci-lint",
+		"npm_config_cache": home + "/.npm",
+		"XDG_CACHE_HOME":  home + "/.cache",
+		"PIP_CACHE_DIR":   home + "/.cache/pip",
+		"CARGO_HOME":      home + "/.cargo",
+		"RUSTUP_HOME":     home + "/.rustup",
+	}
+}
+
 // scrubEnv builds a sandboxed environment from the current process env.
 // It keeps a locked PATH (dropping user-writable entries), points HOME at
-// the sandbox dir, sets ELING_SANDBOX=1, and strips API keys.
+// the sandbox dir, sets ELING_SANDBOX=1, and strips API keys. Tool caches
+// (GOCACHE, GOPATH, npm, pip…) are redirected to the real home so repeated
+// builds stay fast instead of re-downloading dependencies each invocation.
 func scrubEnv(sandboxDir string) []string {
 	// Locked PATH: system dirs only — safe for a Termux/root host.
 	path := "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	home := sandboxDir
+	caches := toolCacheEnv()
 	// Sandbox-controlled vars — these MUST win, so we both set them first
 	// and skip them when copying the host env (last duplicate wins in execve).
 	controlled := map[string]bool{
@@ -139,12 +211,18 @@ func scrubEnv(sandboxDir string) []string {
 		"LANG":          true,
 		"ELING_SANDBOX": true,
 	}
+	for k := range caches {
+		controlled[k] = true
+	}
 	env := []string{
 		"PATH=" + path,
 		"HOME=" + home,
 		"ELING_SANDBOX=1",
 		"PWD=" + sandboxDir,
 		"LANG=C.UTF-8",
+	}
+	for k, v := range caches {
+		env = append(env, k+"="+v)
 	}
 	for _, kv := range os.Environ() {
 		key := kv

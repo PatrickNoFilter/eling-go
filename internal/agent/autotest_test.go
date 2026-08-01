@@ -193,3 +193,46 @@ func TestFilesUnchangedSince(t *testing.T) {
 		t.Fatal("file modified after cache timestamp should count as changed")
 	}
 }
+
+// TestFindGoModuleRoot: the helper locates the module root by walking up
+// from a nested directory, and returns "" when no go.mod exists anywhere
+// above the given dir.
+func TestFindGoModuleRoot(t *testing.T) {
+	dir := makeModule(t, "rootmod")
+	nested := filepath.Join(dir, "a", "b")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := findGoModuleRoot(nested); got != dir {
+		t.Fatalf("findGoModuleRoot(%q) = %q, want %q", nested, got, dir)
+	}
+	// A directory with no go.mod anywhere above it must return "".
+	nowhere := t.TempDir()
+	if got := findGoModuleRoot(nowhere); got != "" {
+		t.Fatalf("findGoModuleRoot(%q) = %q, want \"\"", nowhere, got)
+	}
+}
+
+// TestAutoTestRunsFromModuleRoot: regression for "go.mod file not found".
+// ELING is frequently started from a directory without go.mod (e.g. /root
+// while the project lives in /root/eling). autoTest must locate the module
+// from the touched file's path and run `go test` from the module root via
+// cmd.Dir — NOT from the process CWD.
+func TestAutoTestRunsFromModuleRoot(t *testing.T) {
+	dir := makeModule(t, "rootrun")
+	// Move the process CWD to a directory with no go.mod — the exact
+	// scenario that used to break autoTest.
+	nowhere := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(nowhere); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	a := helperAgent(t, 0, 300)
+	testFile := filepath.Join(dir, "rootrun_test.go")
+	msgs := []provider.Message{{Role: "tool", Content: testFile}}
+	if got := a.autoTest(msgs); got != "" {
+		t.Fatalf("autoTest from non-module CWD returned failure: %q", got)
+	}
+}
