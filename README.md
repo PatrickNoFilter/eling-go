@@ -571,6 +571,8 @@ echo "$ctx" | grep -q '"tool_name":"edit"' && (cd /root/eling && go vet ./... >/
 
 ## 🔧 Provider Setup
 
+> **v0.4.3:** Provider presets are now sourced from a single `internal/provider/catalog.go` — the setup wizard and CLI share one catalog (`Catalog.Find`, `DefaultProvider`, etc.), so adding a provider in one place updates every entry point, with tests guarding completeness/uniqueness.
+
 ### DeepSeek
 ```bash
 export DEEPSEEK_API_KEY="sk-..."

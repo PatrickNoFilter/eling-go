@@ -8,6 +8,8 @@ reasoning content.
 
 | File | Purpose |
 |------|---------|
+| `catalog.go` | Single-source provider preset catalog (`ProviderSpec`, `Catalog`, `Find()`, `Default*()`) — used by the setup wizard |
+| `catalog_test.go` | Catalog completeness, uniqueness, URL-validity, default checks |
 | `deepseek.go` | `Provider` (Chat/ChatStream), `Manager`, retry config |
 | `rotation_test.go` | Provider rotation/fallback tests |
 
