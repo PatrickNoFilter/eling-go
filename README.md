@@ -119,6 +119,8 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 - **UTF-8 safe**: Rune-aware truncation prevents splitting multi-byte chars
 - **Auto-backup before write/edit**: Every `write`/`edit` snapshots the existing file to `*.bak.<timestamp>` (rotation keeps the last 5; configurable via `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP`)
 - **Web timeout prediction**: `web_fetch`/`web_search` do a fast DNS+TCP preflight probe (dead hosts fail in ~1.5s) and adapt `--max-time` per host based on observed latency/failure history
+- **Hard tool timeouts** (v0.4.0): every tool now has a wall-clock budget (5 min default) enforced by the registry — context-aware tools (web, bash, ocr, read) cancel mid-flight via `CommandContext`, plain tools are cut off by a timer+goroutine guard, and `read` refuses files over 64 MiB up front. No tool can hang the turn; `ocr_review`/`ocr_scan` are capped at 5 min (`tool_timeout_sec` to override)
+- **MCP per-call timeouts** (v0.4.0): every MCP tool call runs under a wall-clock guard too — registry-backed tools (bash/read/write/edit/grep/web_*) keep their registry budgets, and the direct layer handlers (`brain_*`, `facts_*`, `kb_*`, `obsidian_*`, `continuum_*`, `notion_sync`, `markdownify_*`, `system_info`, `blackbox_*`, `code_*`) get strict budgets (10–60 s by category) so a slow layer or network call can never hang an MCP request. Callers can override with a `tool_timeout_sec` arg
 - **Graceful shutdown**: Saves state on SIGTERM, SIGINT
 - **Auto-save**: Periodic state persistence (configurable)
 - **Fatal signal handler**: Catches SIGBUS/SIGSEGV for crash reporting

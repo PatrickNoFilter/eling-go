@@ -691,7 +691,9 @@ func (s *Server) handleToolCall(ctx context.Context, req MCPRequest) {
 		return
 	}
 
-	result, err := s.executeTool(ctx, params.Name, params.Arguments)
+	// Run the tool under a per-call wall-clock budget so no MCP tool can
+	// block the request forever (see executeToolWithTimeout / mcpToolTimeout).
+	result, err := s.executeToolWithTimeout(ctx, params.Name, params.Arguments)
 	if err != nil {
 		s.sendError(req.ID, -32000, err.Error())
 		return
@@ -705,6 +707,108 @@ func (s *Server) handleToolCall(ctx context.Context, req MCPRequest) {
 			},
 		},
 	})
+}
+
+// mcpToolTimeout returns the per-call wall-clock budget for an MCP tool.
+//
+// Registry-backed tools (bash, read, write, edit, grep, web_search, web_fetch)
+// already enforce their own budgets via the tool registry's ExecuteContext,
+// so the values below match those registry Timeouts — the outer guard here is
+// only a safety net and never cuts them off before the registry does.
+//
+// Direct layer handlers (brain, facts, kb, obsidian, continuum, notion,
+// markdownify, system_info, blackbox, code) previously had NO timeout at all:
+// a slow layer query or network call (e.g. notion_sync, markdownify_url)
+// could hang the MCP request indefinitely. Those get strict budgets so the
+// agent fails fast instead of blocking.
+func mcpToolTimeout(name string) time.Duration {
+	switch name {
+	// Registry-backed tools — budgets aligned with internal/tools registry.
+	case "bash":
+		return 10 * time.Minute
+	case "read":
+		return 20 * time.Second
+	case "write", "edit", "grep":
+		return 20 * time.Second
+	case "web_search", "web_fetch":
+		return 30 * time.Second
+
+	// Fast local lookups: must never take long.
+	case "system_info", "brain_get_context", "continuum_list_agents":
+		return 10 * time.Second
+
+	// Quick local stores/searches.
+	case "facts_store", "facts_search", "kb_store", "kb_search",
+		"continuum_heartbeat", "continuum_share":
+		return 20 * time.Second
+
+	// Multi-layer queries and heavier local ops.
+	case "brain_query", "brain_store", "blackbox_record", "blackbox_score",
+		"obsidian_write", "obsidian_search", "markdownify_file", "code_search":
+		return 30 * time.Second
+
+	// Network / heavy indexing: slowest allowed, still bounded.
+	case "code_index", "notion_sync", "markdownify_url":
+		return 60 * time.Second
+
+	default:
+		return 30 * time.Second
+	}
+}
+
+// executeToolWithTimeout runs a tool call under a wall-clock guard. It mirrors
+// the registry's plain-Execute strategy: the handler runs in a goroutine and a
+// select enforces the per-tool budget (or an earlier parent ctx deadline), so
+// a hung layer/network operation returns a timeout error instead of blocking
+// the MCP request indefinitely. An optional tool_timeout_sec arg overrides the
+// default budget for callers that need more/less time.
+func (s *Server) executeToolWithTimeout(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	budget := mcpToolTimeout(name)
+	if n, ok := args["tool_timeout_sec"].(float64); ok && n > 0 {
+		// float64 → Duration directly (time.Duration(n) would truncate
+		// fractional seconds to 0).
+		budget = time.Duration(n * float64(time.Second))
+	} else if str, ok := args["tool_timeout_sec"].(string); ok && str != "" {
+		var secs int
+		if _, err := fmt.Sscanf(str, "%d", &secs); err == nil && secs > 0 {
+			budget = time.Duration(secs) * time.Second
+		}
+	}
+
+	return runWithTimeout(ctx, name, budget, func() (string, error) {
+		return s.executeTool(ctx, name, args)
+	})
+}
+
+// runWithTimeout is the shared wall-clock guard used by executeToolWithTimeout.
+// It runs fn in a goroutine and enforces the budget / parent ctx deadline so a
+// hung operation returns a timeout error instead of blocking forever. On
+// budget expiry it SIGKILLs any tracked subprocesses (curl/bash spawned by
+// registry-backed tools) so nothing lingers in the background.
+func runWithTimeout(ctx context.Context, name string, budget time.Duration, fn func() (string, error)) (string, error) {
+	type toolResult struct {
+		out string
+		err error
+	}
+	done := make(chan toolResult, 1)
+	go func() {
+		out, err := fn()
+		done <- toolResult{out, err}
+	}()
+
+	select {
+	case r := <-done:
+		return r.out, r.err
+	case <-ctx.Done():
+		// Parent deadline (host shutdown / turn max_duration) fired first.
+		return "", fmt.Errorf("tool %q aborted: %v", name, ctx.Err())
+	case <-time.After(budget):
+		// Hard per-call budget exceeded. Kill any tracked subprocesses so
+		// curl/bash spawned by registry-backed tools cannot linger.
+		tools.KillRunningTools()
+		return "", fmt.Errorf("tool %q timed out after %v (MCP per-call budget; "+
+			"override with tool_timeout_sec arg)", name, budget)
+	}
 }
 
 // handleResourcesList returns available resources (for future use).
