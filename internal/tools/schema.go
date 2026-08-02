@@ -79,9 +79,11 @@ var paramSchemas = map[string]map[string]interface{}{
 	"edit": {
 		"type": "object",
 		"properties": map[string]interface{}{
-			"file_path":  map[string]interface{}{"type": "string", "description": "Path to the file to edit."},
-			"old_string": map[string]interface{}{"type": "string", "description": "Exact text to replace."},
-			"new_string": map[string]interface{}{"type": "string", "description": "Replacement text."},
+			"file_path":   map[string]interface{}{"type": "string", "description": "Path to the file to edit."},
+			"old_string":  map[string]interface{}{"type": "string", "description": "Exact text to replace."},
+			"new_string":  map[string]interface{}{"type": "string", "description": "Replacement text."},
+			"occurrence":  map[string]interface{}{"type": "number", "description": "1-based index of which match to replace when old_string appears multiple times (default 1)."},
+			"source_hash": map[string]interface{}{"type": "string", "description": "The 'hash' value returned by the read tool. When present, the edit aborts if the file changed since it was read, returning both hashes so the model can re-read and retry."},
 		},
 		"required": []string{"file_path", "old_string", "new_string"},
 	},

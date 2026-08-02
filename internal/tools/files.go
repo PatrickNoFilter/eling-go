@@ -3,6 +3,8 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,9 +12,36 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
+
+// fileLocks serializes read-modify-write cycles per absolute file path.
+// Both editExecute and writeExecute take the lock for their whole
+// read → backup → write sequence so two concurrent tool calls (parallel
+// turns, hooks, or dynamic tools) can never interleave and corrupt a file.
+// Keyed by absolute path to avoid alias collisions (./a vs a).
+var fileLocks sync.Map // absPath -> *sync.Mutex
+
+// lockFile returns an unlock func for the given path's per-file mutex.
+func lockFile(path string) func() {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	v, _ := fileLocks.LoadOrStore(abs, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// sha256Hex returns the lowercase hex SHA-256 of data. Used as the
+// hash-anchor for source_hash verification on edits.
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
 
 func init() {
 	// Register read tool
@@ -39,8 +68,8 @@ func init() {
 	// Register edit tool (like jcode's edit)
 	DefaultRegistry.Register(Tool{
 		Name:        "edit",
-		Description: "Replace specific text in a file with new text. Uses exact string matching (not regex). Specify old_string and new_string. Automatically creates a timestamped .bak backup before applying the edit (rotation keeps the last 5 backups per file).",
-		Version:     "1.1.0",
+		Description: "Replace specific text in a file with new text. Uses exact string matching (not regex). Specify old_string and new_string. Optionally pass occurrence (1-based, default 1) to pick which match to replace when old_string appears multiple times, and source_hash (the 'hash' value returned by the read tool) to abort the edit if the file changed since it was read — a mismatch returns both hashes so you can re-read and retry. Automatically creates a timestamped .bak backup before applying the edit (rotation keeps the last 5 backups per file).",
+		Version:     "1.2.0", // hash-anchored edits + occurrence targeting + per-file lock
 		Category:    "system",
 		Execute:     editExecute,
 		Timeout:     fileToolTimeout,
@@ -227,6 +256,10 @@ func readExecuteInner(args map[string]interface{}) (interface{}, error) {
 		"content": contentStr,
 		"lines":   linesReturned,
 		"size":    len(data),
+		// hash anchors the file content as seen by the model. Pass it back as
+		// edit's source_hash to abort the edit if the file drifted in between
+		// (parallel edit, hook, external process) — see editExecute.
+		"hash": sha256Hex(data),
 	}), nil
 }
 
@@ -238,6 +271,9 @@ func writeExecute(args map[string]interface{}) (interface{}, error) {
 	if path == "" {
 		return Err("path is required"), nil
 	}
+	// Serialize with edits on the same file (read → backup → write must be atomic).
+	unlock := lockFile(path)
+	defer unlock()
 
 	content, _ := args["content"].(string)
 
@@ -297,10 +333,31 @@ func editExecute(args map[string]interface{}) (interface{}, error) {
 
 	oldStr, _ := args["old_string"].(string)
 	newStr, _ := args["new_string"].(string)
+	sourceHash, _ := args["source_hash"].(string)
 
 	if oldStr == "" {
 		return Err("old_string is required"), nil
 	}
+
+	// occurrence: 1-based index of which match to replace (default 1).
+	// Kills the old strings.Replace(...,1) first-match ambiguity: when
+	// old_string appears N times the model can target exactly the one it
+	// means instead of gambling on position.
+	occurrence := 1
+	switch v := args["occurrence"].(type) {
+	case float64:
+		occurrence = int(v)
+	case string:
+		fmt.Sscanf(v, "%d", &occurrence)
+	}
+	if occurrence < 1 {
+		occurrence = 1
+	}
+
+	// Serialize with other edits/writes on the same file so the whole
+	// read → verify → replace → backup → write cycle is atomic.
+	unlock := lockFile(path)
+	defer unlock()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -312,11 +369,40 @@ func editExecute(args map[string]interface{}) (interface{}, error) {
 	}
 
 	content := string(data)
-	if !strings.Contains(content, oldStr) {
-		return Err(fmt.Sprintf("old_string not found in %s", path)), nil
+
+	// Hash-anchor verification (optional source_hash): the model passes the
+	// "hash" it got from read. If the file changed since then (parallel edit,
+	// hook, external process), abort with both hashes so the model can
+	// re-read and self-correct instantly instead of silently editing stale
+	// content or burning retry loops.
+	if sourceHash != "" {
+		actual := sha256Hex(data)
+		if !strings.EqualFold(actual, sourceHash) {
+			return Err(fmt.Sprintf(
+				"source_hash mismatch for %s: expected %s, computed %s (file changed since it was read). Re-read the file and retry with the new hash.",
+				path, sourceHash, actual)), nil
+		}
 	}
 
-	newContent := strings.Replace(content, oldStr, newStr, 1)
+	total := strings.Count(content, oldStr)
+	if total == 0 {
+		// Drift hint: if only whitespace/line-endings differ, say so — the
+		// model re-copies exact bytes instead of retrying the same string.
+		if hint := whitespaceNormalizedHint(content, oldStr); hint != "" {
+			return Err(fmt.Sprintf("old_string not found in %s. %s", path, hint)), nil
+		}
+		return Err(fmt.Sprintf("old_string not found in %s", path)), nil
+	}
+	if occurrence > total {
+		return Err(fmt.Sprintf(
+			"old_string occurs %d time(s) in %s but occurrence=%d was requested (max %d). Use occurrence 1..%d or a more specific old_string.",
+			total, path, occurrence, total, total)), nil
+	}
+
+	newContent, ok := replaceNth(content, oldStr, newStr, occurrence)
+	if !ok {
+		return Err(fmt.Sprintf("occurrence %d of old_string not found in %s", occurrence, path)), nil
+	}
 
 	// Generate unified diff
 	diff := buildDiff(path, content, newContent, oldStr, newStr)
@@ -332,12 +418,65 @@ func editExecute(args map[string]interface{}) (interface{}, error) {
 	}
 
 	return OK(map[string]interface{}{
-		"path":    path,
-		"edited":  true,
-		"changes": 1,
-		"diff":    diff,
-		"backup":  backupPath,
+		"path":             path,
+		"edited":           true,
+		"changes":          1,
+		"occurrence":       occurrence,
+		"total_occurrences": total,
+		"diff":             diff,
+		"backup":           backupPath,
+		// New file hash — pass it as source_hash on the next edit to chain
+		// edits without a re-read round-trip.
+		"hash": sha256Hex([]byte(newContent)),
 	}), nil
+}
+
+// replaceNth replaces only the n-th (1-based) occurrence of old in s.
+// Returns ok=false if the n-th occurrence does not exist.
+func replaceNth(s, old, new string, n int) (string, bool) {
+	if n < 1 {
+		n = 1
+	}
+	start := 0
+	found := 0
+	for {
+		i := strings.Index(s[start:], old)
+		if i < 0 {
+			return s, false
+		}
+		abs := start + i
+		found++
+		if found == n {
+			return s[:abs] + new + s[abs+len(old):], true
+		}
+		start = abs + len(old)
+	}
+}
+
+// whitespaceNormalizedHint returns an actionable hint when oldStr is absent
+// from content but present after stripping all whitespace (the most common
+// drift cause: tabs vs spaces, CRLF vs LF, wrapped lines). Empty string
+// means no normalized match was found.
+func whitespaceNormalizedHint(content, oldStr string) string {
+	strip := func(s string) string {
+		var b strings.Builder
+		b.Grow(len(s))
+		for _, r := range s {
+			switch r {
+			case ' ', '\t', '\n', '\r':
+			default:
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	if strip(oldStr) == "" {
+		return ""
+	}
+	if strings.Contains(strip(content), strip(oldStr)) {
+		return "old_string differs from the file only in whitespace/line endings. Re-copy the exact bytes from the read tool output (watch tabs vs spaces and CRLF vs LF) and retry."
+	}
+	return ""
 }
 
 // backupFile creates a timestamped snapshot of path before it is modified.
