@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"eling/internal/config"
+	"eling/internal/provider"
 )
 
 const (
@@ -227,7 +228,6 @@ func setupInteractive(cfgPath string, existing *config.Config) bool {
 	}
 
 	fmt.Println("\nAvailable providers:")
-	presets := setupPresets()
 	type catalogEntry struct {
 		name   string
 		model  string
@@ -238,9 +238,9 @@ func setupInteractive(cfgPath string, existing *config.Config) bool {
 	for _, p := range existing.Agent.Providers {
 		catalog = append(catalog, catalogEntry{p.Name, p.Model, p.BaseURL, true})
 	}
-	for _, p := range presets {
-		if !hasProvider(existing, p[0]) {
-			catalog = append(catalog, catalogEntry{p[0], p[1], p[2], false})
+	for _, p := range provider.Catalog {
+		if !hasProvider(existing, p.Name) {
+			catalog = append(catalog, catalogEntry{p.Name, p.Model, p.BaseURL, false})
 		}
 	}
 	catalog = append(catalog, catalogEntry{"custom", "", "", false})
@@ -337,18 +337,6 @@ func setupInteractive(cfgPath string, existing *config.Config) bool {
 	return true
 }
 
-// setupPresets returns built-in provider presets: name, model, base URL.
-func setupPresets() [][3]string {
-	return [][3]string{
-		{"opencode-zen", "deepseek-v4-flash", "https://opencode.ai/zen/v1"},
-		{"opencode-zen-free", "deepseek-v4-flash-free", "https://opencode.ai/zen/v1"},
-		{"deepseek-direct", "deepseek-v4-flash", "https://api.deepseek.com"},
-		{"openrouter", "moonshotai/kimi-k3-free", "https://openrouter.ai/api/v1"},
-		{"openai", "gpt-4o", "https://api.openai.com/v1"},
-		{"groq", "llama-3.3-70b", "https://api.groq.com/openai/v1"},
-	}
-}
-
 func hasProvider(cfg *config.Config, name string) bool {
 	for _, p := range cfg.Agent.Providers {
 		if p.Name == name {
@@ -373,30 +361,27 @@ func setupApply(cfgPath string, existing *config.Config, opts map[string]string,
 		providerName = cfg.Agent.Providers[0].Name
 	}
 	if providerName == "" {
-		providerName = "opencode-zen-free"
+		providerName = provider.DefaultProvider()
 	}
-	for _, p := range setupPresets() {
-		if p[0] == providerName {
-			if model == "" {
-				model = p[1]
-			}
-			if baseURL == "" {
-				baseURL = p[2]
-			}
-			break
+	if spec, ok := provider.Find(providerName); ok {
+		if model == "" {
+			model = spec.Model
+		}
+		if baseURL == "" {
+			baseURL = spec.BaseURL
 		}
 	}
 	if model == "" && len(cfg.Agent.Providers) > 0 {
 		model = cfg.Agent.Providers[0].Model
 	}
 	if model == "" {
-		model = "deepseek-v4-flash-free"
+		model = provider.DefaultModel()
 	}
 	if baseURL == "" && len(cfg.Agent.Providers) > 0 {
 		baseURL = cfg.Agent.Providers[0].BaseURL
 	}
 	if baseURL == "" {
-		baseURL = "https://opencode.ai/zen/v1"
+		baseURL = provider.DefaultBaseURL()
 	}
 	if apiKey == "" {
 		apiKey = os.Getenv("DEEPSEEK_API_KEY")
