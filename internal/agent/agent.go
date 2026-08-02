@@ -26,6 +26,7 @@ import (
 	"eling/internal/hooks"
 	"eling/internal/layers"
 	"eling/internal/lsp"
+	"eling/internal/learnings"
 	"eling/internal/mcp"
 	"eling/internal/provider"
 	"eling/internal/session"
@@ -117,6 +118,11 @@ type Agent struct {
 
 	// Conversation summary for long-term context compression
 	conversationSummary string
+
+	// Learnings (A10): durable lessons loaded from ~/.eling/learnings.md at
+	// boot and injected into the system context of every turn so the model
+	// applies lessons learned in past sessions. Refreshed by Learn().
+	learnings []string
 
 	// State
 	stateDir    string
@@ -280,6 +286,14 @@ func New(cfg *config.Config) (*Agent, error) {
 	// Phase 3 (Qwen-code steal): configure the instant-diagnostics LSP client.
 	// Best-effort — missing server binaries are silently skipped.
 	lsp.Configure(lsp.Config{Enabled: cfg.LSP.Enabled, Servers: cfg.LSP.Servers})
+
+	// A10: load durable learnings from ~/.eling/learnings.md at boot so lessons
+	// recorded in past sessions are injected into every turn's system context.
+	if ls, err := learnings.Load(); err == nil {
+		a.learnings = ls
+	} else {
+		log.Printf("Warning: could not load learnings: %v", err)
+	}
 
 	return a, nil
 }
@@ -1860,6 +1874,7 @@ func (a *Agent) GetStats() map[string]interface{} {
 		"learned_skills":    len(a.skills),
 		"evolutions":        len(a.evolutions),
 		"memory_items":      a.memory.Len(),
+		"learnings":         len(a.learnings),
 		"tools_available":   a.ToolRegistry.Count(),
 		"mcp_servers":       len(mcpServers),
 		"mcp_tools":         0,
@@ -1879,6 +1894,23 @@ func mergeStats(stats map[string]interface{}, reg map[string]interface{}) map[st
 		stats[k] = v
 	}
 	return stats
+}
+
+// Learn records a durable lesson in the learnings journal (~/.eling/learnings.md)
+// and refreshes the in-memory slice so it is injected into subsequent turns
+// (A10). The journal keeps the last 100 entries in memory; the file is
+// append-only and unbounded.
+func (a *Agent) Learn(entry string) error {
+	if err := learnings.Append(entry); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.learnings = append(a.learnings, entry)
+	if len(a.learnings) > 100 {
+		a.learnings = a.learnings[len(a.learnings)-100:]
+	}
+	a.mu.Unlock()
+	return nil
 }
 
 // ListTools returns all available tools from the registry.
@@ -2499,6 +2531,27 @@ Always be helpful, precise, and proactive. Think step by step.`
 			Content: "[Conversation context so far: " + summary + "]",
 		}
 		messages = append(messages, summaryMsg)
+	}
+
+	// A10: inject durable learnings from past sessions (loaded at boot, kept
+	// fresh by Learn()) so lessons learned carry across sessions. Capped to
+	// the most recent 10 to protect the prompt budget for small local models.
+	if n := len(a.learnings); n > 0 {
+		ls := a.learnings
+		if len(ls) > 10 {
+			ls = ls[len(ls)-10:]
+		}
+		var sb strings.Builder
+		sb.WriteString("[Durable learnings from past sessions — apply when relevant]:\n")
+		for _, l := range ls {
+			sb.WriteString("- ")
+			sb.WriteString(l)
+			sb.WriteString("\n")
+		}
+		messages = append(messages, provider.Message{
+			Role:    "system",
+			Content: sb.String(),
+		})
 	}
 
 	// Inject the most recently approved execution plan (plan mode) so the

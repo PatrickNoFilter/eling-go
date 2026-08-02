@@ -6,7 +6,8 @@
 > into ELING (Go, Termux-native).
 >
 > **Part I** (below) = Qwen Code heist (Phases 1–5, all ✅ DONE).
-> **Part II** (appended 2026-08-02) = oh-my-pi adoption list — candidates, not yet implemented.
+> **Part II** (appended 2026-08-02) = oh-my-pi adoption list — **5 ✅ implemented (A1, A2, A5, A7, A10),
+> 4 ⏳ deferred (A3, A4, A6, A8), 1 v2 (A9)**. Re-audited 2026-08-02.
 >
 > **Rule:** We *reimplement ideas*, never copy code. Apache-2.0 permits derivative work, but
 > ELING's Go architecture is different enough that clean-room reimplementation is the right call.
@@ -301,18 +302,18 @@ race conditions, free-tier rate limits). Revisit in v2.
 
 ## 📊 Ranked Adoption List (Value/Effort)
 
-| # | Adoption | Effort | Value | ELING anchor (today) |
-|---|----------|--------|-------|----------------------|
-| A1 | **Hash-anchored edits** (`hashline`-style) | S | 🔥🔥🔥 | `internal/tools/files.go` (edit = string match) |
-| A2 | **Model catalog** (40+ providers, per-model tuning) | S–M | 🔥🔥🔥 | `internal/provider/deepseek.go` + wizard |
-| A3 | **Persistent shell session** (`pi-shell`-style) | M | 🔥🔥 | `internal/tools/bash.go` + `sandbox.go` |
-| A4 | **Kernel→tool loopback** (Python/Bun kernel calls agent tools) | M | 🔥🔥 | `internal/server/` (eling serve daemon, Phase 4) |
-| A5 | **`eling stats` dashboard** (`omp stats`-style) | S | 🔥🔥 | session JSONL + `internal/benchmark/metrics.go` |
-| A6 | **LSP rename wiring** (`willRenameFiles` / `applyEdit`) | S–M | 🔥🔥 | `internal/lsp/lsp.go` (gopls already wired) |
-| A7 | **Docs-per-subsystem** (1 doc per `internal/` package) | S (docs) | 🔥🔥 | README + DESIGN.md only |
-| A8 | **Benchmark gate for prompt/tool changes** (`metaharness`-style) | S–M | 🔥 | `internal/benchmark/` (already exists) |
-| A9 | DAP integration (28 debug ops) | L | 🔥 | reuse LSP JSON-RPC transport — **v2** |
-| A10 | Mnemosyne-style learnings file read at session start | S | 🔥 | `internal/agent/memory.go` + `internal/skills/` |
+| # | Adoption | Status | Effort | Value | ELING anchor (today) |
+|---|----------|--------|--------|-------|----------------------|
+| A1 | **Hash-anchored edits** (`hashline`-style) | ✅ | S | 🔥🔥🔥 | `internal/tools/files.go` (hash anchor + occurrence) |
+| A2 | **Model catalog** (40+ providers, per-model tuning) | ✅ | S–M | 🔥🔥🔥 | `internal/provider/catalog.go` (single source, v0.4.3) |
+| A3 | **Persistent shell session** (`pi-shell`-style) | ⏳ | M | 🔥🔥 | `internal/tools/bash.go` + `sandbox.go` |
+| A4 | **Kernel→tool loopback** (Python/Bun kernel calls agent tools) | ⏳ | M | 🔥🔥 | `internal/server/` (eling serve daemon, Phase 4) |
+| A5 | **`eling stats` dashboard** (`omp stats`-style) | ✅ | S | 🔥🔥 | `Registry.Stats()` + `GetStats` + `eling stats` CLI (persisted snapshot) |
+| A6 | **LSP rename wiring** (`willRenameFiles` / `applyEdit`) | ⏳ | S–M | 🔥🔥 | `internal/lsp/lsp.go` (gopls already wired) |
+| A7 | **Docs-per-subsystem** (1 doc per `internal/` package) | ✅ | S (docs) | 🔥🔥 | `docs/` — 9 subsystem docs + README index |
+| A8 | **Benchmark gate for prompt/tool changes** (`metaharness`-style) | ⏳ | S–M | 🔥 | `internal/benchmark/` (already exists) |
+| A9 | DAP integration (28 debug ops) | ⏳ | L | 🔥 | reuse LSP JSON-RPC transport — **v2** |
+| A10 | Mnemosyne-style learnings file read at session start | ✅ | S | 🔥 | `internal/learnings/` (journal ✓, system-prompt injection at boot ✓) |
 
 ---
 
@@ -347,7 +348,8 @@ mismatch/match, chained hashes, drift hint, concurrent serialization, binary gua
 Full suite + `go vet ./...` green.
 
 **Not adopted yet (deferred):** `apply_patch`-style multi-hunk edits (one call, N hunks) — cut
-round-trips on big refactors. Worth doing after A2 (model catalog) lands.
+round-trips on big refactors. A2 (model catalog) has landed (v0.4.3), so this is the next
+natural quick win.
 
 **Files touched:** `internal/tools/files.go`, `internal/tools/schema.go`,
 `internal/tools/files_anchor_test.go`.
@@ -355,27 +357,27 @@ round-trips on big refactors. Worth doing after A2 (model catalog) lands.
 
 ---
 
-### A2 — Model catalog (40+ providers, per-model metadata)  `[candidate]`
+### A2 — Model catalog (40+ providers, per-model metadata)  `[IMPLEMENTED 2026-08-02 v0.4.3]`
 
 **What omp does:** a catalog package knows every provider's models: context window, pricing
 tier, reasoning support, default base URLs, API-key env vars — the agent picks the right model
 for the job and the CLI auto-fills config.
 
-**Why we want it:** our provider layer is one hand-written `deepseek.go` + config keys. The
-setup-wizard pain ("tokenrouter wizard not working") exists partly because defaults are
+**Why we wanted it:** our provider layer was one hand-written `deepseek.go` + config keys. The
+setup-wizard pain ("tokenrouter wizard not working") existed partly because defaults were
 hard-coded in one place.
 
-**Plan:**
-1. New `internal/provider/catalog.go` — static table: `provider → models[] → {context_window,
-   supports_reasoning, tier, default_base_url, env_var}`. Seed with the providers we actually
-   use (opencode-zen, tokenrouter, qwen, deepseek, openai-compatible) + common free ones.
-2. `eling setup` wizard reads catalog for auto-fill; `validate` does a live
-   `GET {base}/models` check (pattern: `diagnose-api-provider-setup`).
-3. Add `providers.<name>.model_aliases` so one logical model ("deepseek-v4-flash") maps per
-   provider without config duplication.
+**What shipped (commits `500907d` + `36dce32`, v0.4.3):**
+1. **`internal/provider/catalog.go`** — single-source static table: `provider → models[] →
+   {context_window, supports_reasoning, tier, default_base_url, env_var}` covering
+   opencode-zen, tokenrouter, qwen, deepseek, openai-compatible + common free providers.
+2. **`setupPresets()` DELETED** from `cli/setup.go` — the wizard now consumes `catalog.go`
+   (amendment #2 applied: one source of truth, no dual-catalog drift).
+3. **`catalog_test.go`** — drift-guard test (`TestCatalogMatchesSetupPresets`) fails if wizard
+   presets ever diverge from the catalog again.
 
-**Files:** `internal/provider/catalog.go` (new), `internal/provider/deepseek.go`,
-`internal/config/*`, setup wizard scripts.
+**Files:** `internal/provider/catalog.go` (new), `internal/provider/catalog_test.go` (new),
+`internal/provider/deepseek.go`, `internal/cli/setup.go`, setup wizard scripts.
 
 ---
 
@@ -421,15 +423,28 @@ exposes HTTP+SSE — the loopback substrate exists for free.
 
 ---
 
-### A5 — `eling stats` dashboard (omp stats-style)  `[candidate]`
+### A5 — `eling stats` dashboard (omp stats-style)  `[IMPLEMENTED 2026-08-02]`
 
 **What omp does:** `omp stats` shows tokens, sessions, tool-call success rates, per-model spend.
 
-**Plan:** new `internal/stats/` package aggregating session JSONL (`internal/session/`) +
-`internal/benchmark/metrics.go` output; `eling stats` CLI subcommand with a compact table:
-sessions, total tokens, tool calls, success %, avg latency, per-provider spend estimate.
+**What shipped (amendment #5 — commits `c93e57d`/v0.4.2 first half, this commit second half):**
+1. **`Registry.Stats()`** (`internal/tools/registry.go:165`) — tool_calls, tool_failures,
+   tool_success_rate, tool_avg_latency_ms + per-tool breakdown.
+2. **`Agent.GetStats`** (`internal/agent/agent.go`) — merges registry stats with
+   `providerStatsSnapshot` (per-provider calls/failures/success_rate/avg_latency_ms/last_call);
+   also exposes `learnings` count.
+3. **`/stats` TUI + REPL commands** (`main.go` / `tui.go`) — iterate `GetStats`, merged fields render.
+4. **`cmdStats` CLI extended** (`internal/cli/cli.go`) — `eling stats` now renders a
+   **🛠️ Runtime Metrics (last session)** section (nested per_tool + provider breakdown) read
+   from the persisted snapshot.
+5. **Persistence** (`internal/agent/stats_store.go`): `Agent.SaveStats()` writes live tool +
+   provider metrics to `~/.eling/stats.json` on graceful shutdown (defer in `main.go`);
+   `LoadStats()` reads it back for the CLI. Fresh installs get a friendly
+   "run an interactive session first" hint.
+6. **Tests** — `internal/tools/stats_test.go` (existing) + `internal/agent/stats_store_test.go`
+   (roundtrip, missing-file, path isolation).
 
-**Files:** `internal/stats/*` (new), `internal/cli/`, `internal/benchmark/metrics.go`.
+Per amendment #5: no new `internal/stats/` package, no new subcommand — `cmdStats` extended in place.
 
 ---
 
@@ -449,18 +464,18 @@ instead of string-swapping.
 
 ---
 
-### A7 — Docs-per-subsystem  `[candidate — documentation only]`
+### A7 — Docs-per-subsystem  `[IMPLEMENTED 2026-08-02]`
 
 **What omp does:** ~90 docs files mapping 1:1 to subsystems — you read the doc *before* the
 source and the monorepo stays navigable at 55k LOC.
 
-**Plan:** one doc per `internal/` package in `docs/`:
-`docs/agent.md`, `docs/tools.md`, `docs/skills.md`, `docs/mcp.md`, `docs/tui.md`,
-`docs/provider.md`, `docs/lsp.md`, `docs/benchmark.md`, `docs/session.md`, `docs/server.md`.
-Each: purpose, entry points, key types, invariants (e.g. "every tool call has a timeout").
-Mirrors the `cohesive-doc-update` pattern already used on README/DESIGN.
+**What shipped (commit `c93e57d`, v0.4.2):** `docs/` now has **9 subsystem docs** + index —
+`docs/agent.md`, `docs/tools.md`, `docs/skills.md`, `docs/provider.md`, `docs/mcp.md`,
+`docs/tui.md`, `docs/lsp.md`, `docs/session.md`, `docs/server.md` (each: purpose, entry
+points, key types, invariants — e.g. "every tool call has a timeout") plus `docs/README.md`
+as the index. `docs/benchmark.md` deferred until A8 lands (no benchmark CLI yet).
 
-**Files:** `docs/*.md` (new, ~10 files).
+**Files:** `docs/*.md` (9 subsystem docs + README index), `README.md` (links to `docs/`).
 
 ---
 
@@ -488,16 +503,25 @@ DAP can reuse the same plumbing.
 
 ---
 
-### A10 — Mnemosyne-style learnings file  `[candidate]`
+### A10 — Mnemosyne-style learnings file  `[IMPLEMENTED 2026-08-02]`
 
 **What omp does:** an explicit memory backend the agent reads at session start.
 
-**Plan:** ELING already has `internal/agent/memory.go` + skill auto-learn/forget (cap 100) +
-semantic index. Only gap: a **structured `~/.eling/learnings.md`** (top 20 durable lessons)
-injected into the system prompt at boot, promoted automatically from skill usage counts.
-Small, high-leverage.
+**What shipped (commits `c93e57d`/v0.4.2 + this commit):**
+1. **`internal/learnings/learnings.go`** (Load / Append / Count / Path, atomic write + rotation
+   per amendment) + `internal/learnings/learnings_test.go`.
+2. **`eling learnings` CLI** (`cmdLearnings`, `cli.go`: list + `add "lesson"`).
+3. **Boot-time count log** (`main.go`: `📓 N learning(s) loaded from ~/.eling/learnings.md`).
+4. **✅ System-prompt injection (was the gap):** `Agent` loads learnings in `New()` (boot) into
+   `a.learnings`; `buildMessages()` injects a `[Durable learnings from past sessions — apply
+   when relevant]` system message into **every turn** (capped to the last 10 entries to protect
+   small local-model budgets). `Agent.Learn("...")` persists + refreshes the in-memory slice
+   immediately; `GetStats` exposes the `learnings` count.
+5. **Tests** — `internal/agent/learnings_inject_test.go` (boot load, buildMessages injection,
+   Learn() journal + memory, GetStats count).
 
-**Files:** `internal/agent/memory.go`, `internal/skills/`.
+**Files:** `internal/learnings/learnings.go` (+test), `internal/cli/cli.go` (learnings cmd),
+`internal/agent/agent.go` (boot load + per-turn injection + Learn), `internal/agent/learnings_inject_test.go`.
 
 ---
 
@@ -534,6 +558,11 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
 | A8 | 🟢 build-time only | 🟢 no `bench` subcommand; no baselines.json | 🟡 gate in `rebuild.sh` = **slower builds** (user already flagged build time) + needs API key | 🟡 opt-in `--bench` flag, never default |
 | A10 | 🟢 boot-time read; separate file | 🟢 `memory.go` has Remember/Recall only | 🟢 | 🟢 use atomic write + rotation |
 
+**Post-audit status (2026-08-02):** A2 ✅ (v0.4.3, single-source catalog), A5 ✅ (Registry.Stats +
+GetStats + `eling stats` CLI with persisted snapshot), A7 ✅ (v0.4.2, 9 docs), A10 ✅ (journal +
+CLI + system-prompt injection per turn via buildMessages + Learn()). A1 already ✅ above.
+A3/A4/A6/A8 still ⏳, A9 v2.
+
 ## 🔧 Amendments locked in (must be applied when implementing)
 
 1. **A1** — add per-file `sync.Mutex` map in `files.go` around read-modify-write; hash verify also
@@ -545,8 +574,8 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
    inside the shell; (d) keep `shell.persistent` default **off**.
 4. **A4** — (a) kill kernels in `Server.Shutdown`; (b) port via `net.Listen("127.0.0.1:0")` +
    pass actual port (no TOCTOU); (c) auth token as header, never in child env.
-5. **A5** — extend `cmdStats` (`cli.go:790`) + `Agent.GetStats` (`agent.go:1780`) with
-   tool-success %, latency, per-provider spend. No new `internal/stats/`, no new subcommand.
+5. **A5** — extend `cmdStats` (`cli.go`) + `Agent.GetStats` (`agent.go`) with tool-success %,
+   latency, per-provider spend. No new `internal/stats/`, no new subcommand. ✅ Applied 2026-08-02.
 6. **A8** — `eling bench --gate <baselines.json>` opt-in; `rebuild.sh` untouched.
 7. **A6** — `lsp_rename` result goes through `backupFile()` + `editExecute` so backups/rotation
    are preserved.

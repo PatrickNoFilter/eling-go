@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -818,7 +819,39 @@ func cmdStats(cfg *config.Config) bool {
 		}
 	}
 
+	// A5: runtime tool + provider metrics persisted at graceful shutdown.
+	// In a fresh CLI process the live counters are zero, so we read the
+	// snapshot written by the last interactive session (~/.eling/stats.json).
+	if rt := agent.LoadStats(); rt != nil {
+		fmt.Println()
+		fmt.Println("🛠️ Runtime Metrics (last session)")
+		fmt.Println(strings.Repeat("─", 50))
+		printStatsMap(rt, "  ")
+	} else {
+		fmt.Println()
+		fmt.Println("🛠️ No runtime tool metrics yet — run an interactive session first (they persist on exit).")
+	}
+
 	return true
+}
+
+// printStatsMap prints a nested stats map with sorted keys (A5). Maps are
+// printed as indented headers followed by their entries; scalars inline.
+func printStatsMap(m map[string]interface{}, indent string) {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := m[k]
+		if sub, ok := v.(map[string]interface{}); ok && len(sub) > 0 {
+			fmt.Printf("%s%s:\n", indent, k)
+			printStatsMap(sub, indent+"  ")
+		} else {
+			fmt.Printf("%s%s: %v\n", indent, k, v)
+		}
+	}
 }
 
 // ── Learnings Command (A10) ──────────────────────────────────────────────

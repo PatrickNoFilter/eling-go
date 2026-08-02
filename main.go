@@ -389,6 +389,14 @@ func main() {
 		log.Printf("📓 %d learning(s) loaded from %s", n, learnings.Path())
 	}
 
+	// A5: persist live tool + provider metrics on graceful shutdown so the
+	// standalone `eling stats` CLI can display them across processes.
+	defer func() {
+		if err := ag.SaveStats(); err != nil {
+			log.Printf("⚠️  could not persist stats: %v", err)
+		}
+	}()
+
 	// Phase 1: configure the bash sandbox from config (default on).
 	tools.SetSandbox(tools.SandboxSettings{
 		Enabled:    cfg.Sandbox.Enabled,

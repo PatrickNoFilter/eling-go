@@ -240,6 +240,15 @@ Or configure via command line:
 # Daemon Mode (HTTP+SSE — multi-client agent, Phase 4)
 ./eling serve                                     # Listen on 127.0.0.1:8765 (config server.addr)
 ./eling serve --addr 0.0.0.0:8765 --token "sk-.." # LAN mode with Bearer auth
+
+# CLI Subcommands
+./eling stats                                     # Brain stats + runtime tool/provider metrics (A5)
+./eling learnings                                 # List durable lessons journal (~/.eling/learnings.md)
+./eling learnings add "lesson text"               # Record a durable lesson (injected into future prompts)
+./eling config list                               # Show current config
+./eling config get <key>                          # Read a config value
+./eling evolve                                    # Trigger brain evolution
+./eling snapshot                                  # Save brain state snapshot
 ```
 
 ### Daemon Mode (`eling serve`)
@@ -275,7 +284,7 @@ curl -N -X POST http://127.0.0.1:8765/v1/chat \
 | Command | Description |
 |---------|-------------|
 | `/help` | Show all available commands |
-| `/stats` | Agent statistics (conversations, skills, memory, tokens) |
+| `/stats` | Agent statistics (conversations, skills, memory, tokens, tool calls, learnings) |
 | `/tools` | List all registered tools |
 | `/skills` | Show learned skills |
 | `/memory` | Show recent memories |
