@@ -46,6 +46,26 @@ type Session struct {
 	Plan string `json:"plan,omitempty"`
 }
 
+// cloneSession returns a deep copy of s. Slices and maps are copied so
+// mutations to the original (e.g. concurrent Append) never affect the copy.
+func cloneSession(s *Session) *Session {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	if s.Entries != nil {
+		c.Entries = make([]Entry, len(s.Entries))
+		copy(c.Entries, s.Entries)
+	}
+	if s.Metadata != nil {
+		c.Metadata = make(map[string]string, len(s.Metadata))
+		for k, v := range s.Metadata {
+			c.Metadata[k] = v
+		}
+	}
+	return &c
+}
+
 // Manager handles session persistence.
 type Manager struct {
 	mu       sync.RWMutex
@@ -78,12 +98,54 @@ func (m *Manager) Create(name, model string) *Session {
 	return s
 }
 
-// Get retrieves a session by name.
+// Get retrieves a session by name, returning the live pointer. Callers that
+// hold the manager lock across their reads, or that need to mutate entries
+// via the locked helpers (Append / SetLastEntryTokens / SetMetadata), may use
+// this directly. External readers that only inspect the session (TUI, stats)
+// MUST use GetCopy instead to avoid racing concurrent Append calls.
 func (m *Manager) Get(name string) (*Session, bool) {
 	m.mu.RLock()
 	s, ok := m.sessions[name]
 	m.mu.RUnlock()
 	return s, ok
+}
+
+// GetCopy returns a deep copy of the session made under the manager lock.
+// Safe for any caller: the returned session is fully detached, so reading
+// Entries/Metadata afterwards can never race a concurrent Append/AddEntry
+// from another goroutine (Ask turns, interrupted-save defer, HTTP daemon).
+func (m *Manager) GetCopy(name string) (*Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.sessions[name]
+	if !ok || s == nil {
+		return nil, false
+	}
+	return cloneSession(s), true
+}
+
+// SetLastEntryTokens updates the Tokens field of the most recent entry under
+// the manager lock. Safe to call while other goroutines read via GetCopy.
+func (m *Manager) SetLastEntryTokens(name string, tokens int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[name]
+	if !ok || s == nil || len(s.Entries) == 0 {
+		return
+	}
+	s.Entries[len(s.Entries)-1].Tokens = tokens
+}
+
+// LastEntry returns a copy of the most recent entry, or ok=false if the
+// session is missing or empty. Safe for concurrent use.
+func (m *Manager) LastEntry(name string) (Entry, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.sessions[name]
+	if !ok || s == nil || len(s.Entries) == 0 {
+		return Entry{}, false
+	}
+	return s.Entries[len(s.Entries)-1], true
 }
 
 // GetEntriesCopy returns a copy of the session's entries while holding the
@@ -163,9 +225,17 @@ func (m *Manager) List() ([]string, error) {
 }
 
 // Save persists a session to disk.
+// The session is deep-copied under the manager lock so that concurrent
+// Append/AddEntry mutations during JSON marshaling cannot cause a
+// "reflect: slice index out of range" panic (the entry slice is snapshotted
+// before metadata generation and marshaling happen outside the lock).
 func (m *Manager) Save(name string) error {
 	m.mu.RLock()
 	s, ok := m.sessions[name]
+	if ok {
+		// Deep-copy the session so marshaling works on an immutable snapshot.
+		s = cloneSession(s)
+	}
 	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("session %q not found", name)
@@ -289,7 +359,7 @@ func (m *Manager) GetLastSession() (*Session, error) {
 	}
 	m.mu.RUnlock()
 	if last != nil {
-		return last, nil
+		return cloneSession(last), nil
 	}
 
 	// Check disk for sessions

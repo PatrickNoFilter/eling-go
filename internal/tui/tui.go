@@ -145,9 +145,12 @@ func NewProgram(ag *agent.Agent, loc *time.Location) *tea.Program {
 	const defaultMaxMessages = 500
 
 	m := Model{
-		agent:        ag,
-		input:        ti,
-		messages:     []string{infSty.Render("ELING - AI Agent"), ""},
+		agent: ag,
+		input: ti,
+		messages: []string{
+			welcomeMsg(80),
+			"",
+		},
 		width:        80,
 		height:       24,
 		now:          time.Now().In(loc),
@@ -399,6 +402,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.vp.Width = v.Width
 			m.vp.Height = vpHeight
+		}
+		// Re-wrap the welcome legend to the new terminal width so it never
+		// overflows the TUI after a resize.
+		if len(m.messages) > 0 {
+			m.messages[0] = welcomeMsg(m.width)
 		}
 		m.vp.SetContent(strings.Join(m.messages, "\n"))
 
@@ -867,11 +875,11 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 	// Plan mode: attach an interactive approver so the Ask goroutine can
 	// pause with a drafted plan and wait for the user's y/N/Esc verdict.
-	if ag.PlanEnabled {
+	if ag.PlanEnabled.Load() {
 		planCh := make(chan agent.PlanVerdict, 1)
 		m.planCh = planCh
 		m.awaitingPlan = false
-		ag.PlanApprover = func(plan string) agent.PlanVerdict {
+		ag.SetPlanApprover(func(plan string) agent.PlanVerdict {
 			select {
 			case msgCh <- genMsg{gen: myGen, msg: planMsg(plan)}:
 			case <-ctx.Done():
@@ -883,9 +891,9 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 			case <-ctx.Done():
 				return agent.PlanReject
 			}
-		}
+		})
 	} else {
-		ag.PlanApprover = nil
+		ag.SetPlanApprover(nil)
 	}
 
 	// Start a goroutine that sends tool-call events and the final response
@@ -1103,7 +1111,10 @@ func (m Model) cmd(c string) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, infSty.Render("  saved"))
 		}
 	case "/clear":
-		m.messages = []string{infSty.Render("ELING - AI Agent"), ""}
+		m.messages = []string{
+			welcomeMsg(m.width),
+			"",
+		}
 		m.thinkingIdx = -1
 		m.activeTools = nil
 	case "/retry":
@@ -1301,15 +1312,15 @@ func (m Model) cmd(c string) (tea.Model, tea.Cmd) {
 		on := strings.ToLower(strings.Join(pts[1:], " "))
 		switch on {
 		case "on", "1", "yes":
-			m.agent.PlanEnabled = true
+			m.agent.PlanEnabled.Store(true)
 			m.messages = append(m.messages, infSty.Render("  plan mode: ON — drafts a plan for approval each turn ([y]/[n]/[Esc])"))
 		case "off", "0", "no":
-			m.agent.PlanEnabled = false
+			m.agent.PlanEnabled.Store(false)
 			m.messages = append(m.messages, infSty.Render("  plan mode: OFF"))
 		default:
-			m.agent.PlanEnabled = !m.agent.PlanEnabled
+			m.agent.PlanEnabled.Store(!m.agent.PlanEnabled.Load())
 			state := "OFF"
-			if m.agent.PlanEnabled {
+			if m.agent.PlanEnabled.Load() {
 				state = "ON"
 			}
 			m.messages = append(m.messages, infSty.Render(fmt.Sprintf("  plan mode: %s", state)))
@@ -1442,6 +1453,19 @@ func (m Model) View() string {
 		hintLine = hint + "\n"
 	}
 	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s%s", banner, header, body, agentLabel, hintLine, input)
+}
+
+// legendText builds the abbreviation legend (mem/mcp/tls/skl/snd) and wraps
+// it to the given terminal width so the explanation never overflows the TUI.
+func legendText(width int) string {
+	text := "  mem=memory  ·  mcp=MCP servers  ·  tls=tools  ·  skl=skills  ·  snd=sandbox"
+	return dimSty.Render(wrapText(text, width))
+}
+
+// welcomeMsg builds the first message shown in the viewport, wrapping the
+// legend to the current terminal width so it adapts to any screen size.
+func welcomeMsg(width int) string {
+	return infSty.Render("ELING - AI Agent") + "\n" + legendText(width)
 }
 
 func wrapText(text string, width int) string {

@@ -102,11 +102,15 @@ func TestSandboxRunsIsolated(t *testing.T) {
 	if !strings.Contains(stdout, "1") {
 		t.Fatalf("expected ELING_SANDBOX=1, got: %q", stdout)
 	}
-	// HOME must point at the sandbox, not the real home.
+	// HOME must point inside the configured sandbox root (dir), not the
+	// real home. The default sandbox lives at ~/.eling/sandbox, but tests
+	// redirect the root to t.TempDir() — assert against that configured root.
 	for _, line := range strings.Split(stdout, "\n") {
-		if strings.HasPrefix(line, "/root") && strings.Contains(line, ".eling/sandbox") {
-			// good
-		} else if strings.HasPrefix(line, "/root") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "/root") && !strings.HasPrefix(line, dir) {
 			t.Fatalf("HOME leaked to real home: %q", line)
 		}
 	}

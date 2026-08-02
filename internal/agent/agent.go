@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -124,8 +125,15 @@ type Agent struct {
 	// Plan mode (Qwen-code steal, Phase 2): when enabled, Ask() drafts a plan
 	// with tools stripped and waits for user approval before executing tools.
 	// PlanApprover is the approval callback (set by the TUI); nil = auto-approve.
-	PlanEnabled  bool
+	// PlanEnabled is atomic so the TUI /plan toggle (event-loop goroutine) can
+	// flip it while an Ask goroutine is mid-turn without a data race.
+	PlanEnabled  atomic.Bool
 	PlanApprover func(plan string) PlanVerdict
+
+	// planApproverMu guards PlanApprover so the TUI can replace it while a
+	// previous Ask goroutine is still unwinding (e.g. Ctrl+C → immediate
+	// resubmit) without a data race on the callback field.
+	planApproverMu sync.RWMutex
 
 	// Turn timeout history for self-adaptive timeout prediction
 	turnTimeoutMu   sync.RWMutex
@@ -342,6 +350,15 @@ func (a *Agent) fireHook(hookName string, ctx map[string]interface{}) []interfac
 	return a.Brain.FireHook(hookName, ctx)
 }
 
+// SetPlanApprover atomically replaces the plan-approval callback. Safe to
+// call while a previous Ask goroutine may still be running — it waits for
+// any in-flight PlanApprover read (inside draftPlan) to finish first.
+func (a *Agent) SetPlanApprover(fn func(plan string) PlanVerdict) {
+	a.planApproverMu.Lock()
+	a.PlanApprover = fn
+	a.planApproverMu.Unlock()
+}
+
 // draftPlan asks the LLM — with tools stripped and a plan-only system suffix —
 // to produce a numbered execution plan for the current prompt, then asks the
 // user for a verdict via PlanApprover (nil = auto-approve, used by the CLI).
@@ -361,9 +378,14 @@ func (a *Agent) draftPlan(ctx context.Context, prov *provider.Provider, messages
 	}
 	planText = strings.TrimSpace(planText)
 
+	// Read the callback under lock: the TUI may replace it (or clear it) at
+	// any time — e.g. after the user interrupts a turn and submits a new one.
+	a.planApproverMu.RLock()
+	approver := a.PlanApprover
+	a.planApproverMu.RUnlock()
 	verdict := PlanApprove
-	if a.PlanApprover != nil {
-		verdict = a.PlanApprover(planText)
+	if approver != nil {
+		verdict = approver(planText)
 	}
 	return verdict, planText, nil
 }
@@ -380,7 +402,7 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 
 	// Plan mode: clear any stale plan from a previous turn so buildMessages
 	// doesn't inject an outdated plan into the new context.
-	if a.PlanEnabled {
+	if a.PlanEnabled.Load() {
 		if s, ok := a.Sessions.Get(a.sessionName); ok && s.Plan != "" {
 			s.Plan = ""
 		}
@@ -429,7 +451,7 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 
 	// PLAN MODE: draft a numbered plan with tools stripped, then ask the user
 	// to approve / reject / skip it before any tool executes.
-	if a.PlanEnabled {
+	if a.PlanEnabled.Load() {
 		verdict, planText, planErr := a.draftPlan(ctx, prov, messages, currentDuration, callbacks...)
 		if planErr != nil {
 			return "", fmt.Errorf("plan drafting failed: %w", planErr)
@@ -501,9 +523,8 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 			// State mutations under write lock (fast)
 			a.mu.Lock()
 			_ = a.Sessions.Append(a.sessionName, "user", prompt)
-			s, _ := a.Sessions.Get(a.sessionName)
-			if s != nil && len(s.Entries) > 0 {
-				s.Entries[len(s.Entries)-1].Tokens = estimateSessionEntryTokens(s.Entries[len(s.Entries)-1])
+			if last, ok := a.Sessions.LastEntry(a.sessionName); ok {
+				a.Sessions.SetLastEntryTokens(a.sessionName, estimateSessionEntryTokens(last))
 			}
 
 			// Fire post-user-message hook after persisting the user's prompt
@@ -513,14 +534,11 @@ func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolC
 			})
 
 			_ = a.Sessions.AppendWithReasoning(a.sessionName, "assistant", finalContent, a.lastReasoningString())
-			if s != nil && len(s.Entries) > 0 {
-				s.Entries[len(s.Entries)-1].Tokens = totalTokens / 2
+			if _, ok := a.Sessions.LastEntry(a.sessionName); ok {
+				a.Sessions.SetLastEntryTokens(a.sessionName, totalTokens/2)
 			}
-			if s != nil && totalTokens > 0 {
-				if s.Metadata == nil {
-					s.Metadata = make(map[string]string)
-				}
-				s.Metadata["total_tokens"] = fmt.Sprintf("%d", totalTokens)
+			if totalTokens > 0 {
+				_ = a.Sessions.SetMetadata(a.sessionName, "total_tokens", fmt.Sprintf("%d", totalTokens))
 			}
 			a.mu.Unlock()
 
@@ -769,7 +787,7 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 					"reason":  reason,
 				}
 			} else {
-				result, execErr = a.ToolRegistry.Execute(tc.Function.Name, args)
+				result, execErr = a.ToolRegistry.ExecuteContext(toolCtx, tc.Function.Name, args)
 			}
 			a.incrementSkillUsedCount(tc.Function.Name)
 			var resultText string
@@ -1102,6 +1120,7 @@ func trimToolLoopMessages(msgs []provider.Message, keepLast int) []provider.Mess
 //
 //  1. Drops any "tool" role message whose tool_call_id was NOT declared by a
 //     preceding assistant message's tool_calls ("orphan" tool messages).
+//
 //  2. Strips tool_calls from any assistant message that is NOT immediately
 //     followed by tool messages responding to every tool_call_id it declared
 //     ("unsatisfied" tool calls — e.g. after an interrupted/aborted turn
@@ -1299,19 +1318,15 @@ func (a *Agent) AskStream(ctx context.Context, prompt string, onChunk func(strin
 
 			a.mu.Lock()
 			_ = a.Sessions.Append(a.sessionName, "user", prompt)
-			s, _ := a.Sessions.Get(a.sessionName)
-			if s != nil && len(s.Entries) > 0 {
-				s.Entries[len(s.Entries)-1].Tokens = estimateSessionEntryTokens(s.Entries[len(s.Entries)-1])
+			if last, ok := a.Sessions.LastEntry(a.sessionName); ok {
+				a.Sessions.SetLastEntryTokens(a.sessionName, estimateSessionEntryTokens(last))
 			}
 			_ = a.Sessions.AppendWithReasoning(a.sessionName, "assistant", fullResponse, a.lastReasoningString())
-			if s != nil && len(s.Entries) > 0 {
-				s.Entries[len(s.Entries)-1].Tokens = totalTokens / 2
+			if _, ok := a.Sessions.LastEntry(a.sessionName); ok {
+				a.Sessions.SetLastEntryTokens(a.sessionName, totalTokens/2)
 			}
-			if s != nil && totalTokens > 0 {
-				if s.Metadata == nil {
-					s.Metadata = make(map[string]string)
-				}
-				s.Metadata["total_tokens"] = fmt.Sprintf("%d", totalTokens)
+			if totalTokens > 0 {
+				_ = a.Sessions.SetMetadata(a.sessionName, "total_tokens", fmt.Sprintf("%d", totalTokens))
 			}
 			a.mu.Unlock()
 
@@ -1518,7 +1533,7 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 					"reason":  reason,
 				}
 			} else {
-				result, execErr = a.ToolRegistry.Execute(tc.Function.Name, args)
+				result, execErr = a.ToolRegistry.ExecuteContext(toolCtx, tc.Function.Name, args)
 			}
 			a.incrementSkillUsedCount(tc.Function.Name)
 			var resultText string
@@ -1767,7 +1782,7 @@ func (a *Agent) GetStats() map[string]interface{} {
 	defer a.mu.RUnlock()
 
 	mcpServers := a.MCP.List()
-	s, _ := a.Sessions.Get(a.sessionName)
+	s, _ := a.Sessions.GetCopy(a.sessionName)
 	entries := 0
 	totalTokens := 0
 	if s != nil {
@@ -1907,7 +1922,7 @@ func (a *Agent) AddSkill(name, description string) error {
 func (a *Agent) GetSession() *session.Session {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	s, _ := a.Sessions.Get(a.sessionName)
+	s, _ := a.Sessions.GetCopy(a.sessionName)
 	return s
 }
 
@@ -1959,7 +1974,7 @@ func (a *Agent) SetSessionName(name string) error {
 func (a *Agent) SummarizeCurrentSession() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	s, ok := a.Sessions.Get(a.sessionName)
+	s, ok := a.Sessions.GetCopy(a.sessionName)
 	if !ok {
 		return "No active session"
 	}
@@ -2207,18 +2222,20 @@ func safeMarshalJSON(v interface{}) []byte {
 // this will time out after 3 seconds and return an error rather than
 // blocking forever. This is critical for safeSaveState recovery.
 func (a *Agent) SaveState() error {
-	// Try to acquire read lock with a 3-second timeout to prevent deadlock
-	// if another goroutine holds the write lock during panic recovery.
-	lockCh := make(chan struct{}, 1)
-	go func() {
-		a.mu.RLock()
-		close(lockCh)
-	}()
-	select {
-	case <-lockCh:
-		defer a.mu.RUnlock()
-	case <-time.After(3 * time.Second):
-		return fmt.Errorf("save state: could not acquire read lock within 3 seconds (possible deadlock)")
+	// Try to acquire the read lock with a 3-second deadline. TryRLock never
+	// blocks, so no goroutine is stranded waiting for a lock that may never
+	// be released (the old goroutine+channel approach leaked a blocked
+	// goroutine forever on timeout).
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if a.mu.TryRLock() {
+			defer a.mu.RUnlock()
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("save state: could not acquire read lock within 3 seconds (possible deadlock)")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	if err := os.MkdirAll(a.stateDir, 0755); err != nil {
@@ -2341,14 +2358,34 @@ func (a *Agent) buildContext(prompt string) string {
 	// Include only a compact reference so the model knows what's available.
 	toolList := a.ToolRegistry.List()
 	if len(toolList) > 0 {
-		names := make([]string, len(toolList))
-		for i, t := range toolList {
-			names[i] = t.Name
+		allow := tools.ToolAllowlist()
+		names := make([]string, 0, len(toolList))
+		for _, t := range toolList {
+			if allow != nil && !allow[t.Name] {
+				continue
+			}
+			names = append(names, t.Name)
 		}
 		ctx += fmt.Sprintf("\n\n[Tools available: %s]", strings.Join(names, ", "))
 	}
 
 	return ctx
+}
+
+// summaryMaxChars returns the max characters allowed for the injected
+// conversation summary (from ELING_SUMMARY_MAX_CHARS), or 0 when unset
+// (meaning no cap — full summary is used).
+func summaryMaxChars() int {
+	raw := os.Getenv("ELING_SUMMARY_MAX_CHARS")
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // buildMessages creates the message array for the provider.
@@ -2377,10 +2414,17 @@ Always be helpful, precise, and proactive. Think step by step.`
 	// Always include the conversation summary if available — it provides a
 	// bird's-eye view of the entire conversation even when all messages fit
 	// in the budget. This mirrors jcode's approach of always keeping context.
+	// When ELING_SUMMARY_MAX_CHARS is set (e.g. for small-context local
+	// models), the injected summary is capped to that many characters to keep
+	// the prompt small; without it the full summary is used (cloud behavior).
 	if a.conversationSummary != "" {
+		summary := a.conversationSummary
+		if maxChars := summaryMaxChars(); maxChars > 0 && len(summary) > maxChars {
+			summary = summary[:maxChars] + "\n...[summary truncated]"
+		}
 		summaryMsg := provider.Message{
 			Role:    "system",
-			Content: "[Conversation context so far: " + a.conversationSummary + "]",
+			Content: "[Conversation context so far: " + summary + "]",
 		}
 		messages = append(messages, summaryMsg)
 	}

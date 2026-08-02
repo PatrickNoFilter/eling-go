@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"eling/internal/config"
 
@@ -20,9 +21,10 @@ func init() {
 		Description: "Configure ELING agent settings: provider, API key, base URL, model, system prompt, max context. " +
 			"Can also list current config or add a new provider. " +
 			"Runs the eling-setup script. Use when user wants to change provider, update API key, or reconfigure the agent.",
-		Version:  "1.0.0",
+		Version:  "1.1.0", // registry timeout budget
 		Category: "system",
 		Execute:  elingSetupExecute,
+		Timeout:  60 * time.Second, // runs the eling-setup script
 	})
 }
 

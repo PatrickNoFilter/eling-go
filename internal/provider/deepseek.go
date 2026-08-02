@@ -1031,10 +1031,15 @@ func (p *Provider) Chat(ctx context.Context, messages []Message, tools ...ToolDe
 		}
 
 		msg := apiResult.Choices[0].Message
+		content, xmlCalls := extractXMLToolCalls(msg.Content)
+		toolCalls := msg.ToolCalls
+		if len(xmlCalls) > 0 {
+			toolCalls = append(xmlCalls, toolCalls...)
+		}
 		result = &ChatResponse{
-			Content:   msg.Content,
+			Content:   content,
 			Reasoning: msg.ReasoningContent,
-			ToolCalls: msg.ToolCalls,
+			ToolCalls: toolCalls,
 			Tokens:    apiResult.Usage.TotalTokens,
 		}
 		return nil
@@ -1261,16 +1266,20 @@ func (p *Provider) ChatStream(ctx context.Context, messages []Message, onChunk f
 			// If we got some content, save it and return the error so the
 			// retry loop will see gotData=true and stop.
 			if full.Len() > 0 {
-				finalContent = full.String()
+				var xmlCalls []ToolCall
+				finalContent, xmlCalls = extractXMLToolCalls(full.String())
 				finalReasoning = fullReasoning.String()
 				finalCalls = assembleToolCalls(pending, order)
+				finalCalls = append(finalCalls, xmlCalls...)
 			}
 			return fmt.Errorf("stream read error: %w", scanErr)
 		}
 
-		finalContent = full.String()
+		var xmlCalls []ToolCall
+		finalContent, xmlCalls = extractXMLToolCalls(full.String())
 		finalReasoning = fullReasoning.String()
 		finalCalls = assembleToolCalls(pending, order)
+		finalCalls = append(finalCalls, xmlCalls...)
 		return nil
 	})
 
@@ -1538,6 +1547,78 @@ func humanizeOpenAIError(statusCode int, err struct {
 func humanizeSimpleError(statusCode int, msg, code string) string {
 	statusHint := httpStatusHint(statusCode)
 	return fmt.Sprintf("❌ API error %d (%s): %s", statusCode, statusHint, msg)
+}
+
+// extractXMLToolCalls scans a raw completion for SmolLM3-style XML-wrapped
+// tool calls (<tool_call>{"name":..., "arguments":{...}}</tool_call>),
+// converts each into a provider ToolCall, and returns the cleaned content
+// (with the tags removed) plus any calls found. It is a no-op for normal
+// OpenAI-compatible responses, which never contain such tags, so it can run
+// unconditionally for every provider.
+func extractXMLToolCalls(content string) (string, []ToolCall) {
+	if !strings.Contains(content, "<tool_call>") {
+		return content, nil
+	}
+	var calls []ToolCall
+	var clean strings.Builder
+	rest := content
+	for {
+		start := strings.Index(rest, "<tool_call>")
+		if start < 0 {
+			clean.WriteString(rest)
+			break
+		}
+		clean.WriteString(rest[:start])
+		after := rest[start+len("<tool_call>"):]
+		end := strings.Index(after, "</tool_call>")
+		if end < 0 {
+			// Unterminated tag: keep the remainder verbatim.
+			clean.WriteString(rest[start:])
+			break
+		}
+		payload := strings.TrimSpace(after[:end])
+		if tc, ok := parseXMLToolCall(payload); ok {
+			calls = append(calls, tc)
+		} else {
+			// Not a valid tool call: preserve the original text.
+			clean.WriteString(rest[start : start+len("<tool_call>")+end+len("</tool_call>")])
+		}
+		rest = after[end+len("</tool_call>"):]
+	}
+	return clean.String(), calls
+}
+
+// parseXMLToolCall parses one <tool_call> JSON payload of the shape
+// {"name":"edit","arguments":{...}} into a provider ToolCall. The arguments
+// must be a JSON object; they are compacted to a single line so they match
+// the string form produced by OpenAI-compatible APIs.
+func parseXMLToolCall(payload string) (ToolCall, bool) {
+	var raw struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
+		return ToolCall{}, false
+	}
+	if raw.Name == "" || len(raw.Arguments) == 0 {
+		return ToolCall{}, false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw.Arguments, &obj); err != nil {
+		return ToolCall{}, false
+	}
+	args, err := json.Marshal(obj)
+	if err != nil {
+		return ToolCall{}, false
+	}
+	return ToolCall{
+		ID:   "call_" + raw.Name,
+		Type: "function",
+		Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: raw.Name, Arguments: string(args)},
+	}, true
 }
 
 // assembleToolCalls converts pending tool-call fragments into a slice of

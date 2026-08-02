@@ -27,10 +27,13 @@ func TestRealGoplsDiagnostics(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// cold start: initialize handshake + first analysis can take seconds
+	// cold start: initialize handshake + first analysis can take seconds.
+	// On slow devices (e.g. phones) gopls cold start is ~11s, and under
+	// full-suite CPU load it can take far longer — use a generous deadline
+	// to avoid flaky failures unrelated to the LSP client itself.
 	_ = Diagnostics(path, content)
 
-	deadline := time.Now().Add(12 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
 	var diags []Diagnostic
 	for time.Now().Before(deadline) {
 		diags = Diagnostics(path, content)

@@ -22,15 +22,39 @@ var (
 	crashPathsOnce sync.Once
 )
 
+// crashPathsOverride, when non-empty, forces crash/log paths to the given
+// directory instead of $HOME/.eling. Used by tests to keep test panics out of
+// the real crash_report.log.
+var crashPathsOverride string
+
 func initCrashPaths() {
-	homeDir, _ := os.UserHomeDir()
-	if homeDir == "" {
-		homeDir = "/tmp"
+	baseDir := crashPathsOverride
+	if baseDir == "" {
+		homeDir, _ := os.UserHomeDir()
+		if homeDir == "" {
+			homeDir = "/tmp"
+		}
+		baseDir = filepath.Join(homeDir, ".eling")
 	}
-	crashLogDir = filepath.Join(homeDir, ".eling")
+	crashLogDir = baseDir
 	crashReportPath = filepath.Join(crashLogDir, "crash_report.log")
 	mainLogPath = filepath.Join(crashLogDir, "eling.log")
 	_ = os.MkdirAll(crashLogDir, 0755)
+}
+
+// SetCrashPathsForTesting redirects crash report / main log paths to dir.
+// Must be called from tests before any WriteCrashReport / SafePanicRecover
+// call to prevent test panics from polluting the real ~/.eling logs.
+func SetCrashPathsForTesting(dir string) {
+	crashPathsOverride = dir
+	crashPathsOnce = sync.Once{}
+	initCrashPaths()
+}
+
+// ResetCrashPathsForTesting clears a SetCrashPathsForTesting override.
+func ResetCrashPathsForTesting() {
+	crashPathsOverride = ""
+	crashPathsOnce = sync.Once{}
 }
 
 // Level represents log severity.
@@ -362,6 +386,14 @@ func WriteCrashReport(r interface{}, stack string) {
 	}
 }
 
+// isTestBinary reports whether the current process is a Go test binary
+// (os.Args[0] ends with ".test"). Used to keep intentional test panics from
+// polluting the real ~/.eling/crash_report.log when a test forgets to call
+// SetCrashPathsForTesting.
+func isTestBinary() bool {
+	return strings.HasSuffix(strings.ToLower(os.Args[0]), ".test")
+}
+
 // SafePanicRecover recovers from a panic, logs it using both the global logger
 // and the crash report file.
 // Returns true if a panic was recovered.
@@ -383,8 +415,12 @@ func SafePanicRecover(r interface{}, context string) bool {
 		gl.Panic(fmt.Errorf("(%s) %v", context, r))
 	}
 
-	// Also write crash report as fallback
-	WriteCrashReport(fmt.Errorf("(%s) %v", context, r), stack)
+	// Also write crash report as fallback. Skip the real crash log when
+	// running inside a test binary unless a test explicitly redirected the
+	// crash paths (belt-and-suspenders on top of SetCrashPathsForTesting).
+	if crashPathsOverride != "" || !isTestBinary() {
+		WriteCrashReport(fmt.Errorf("(%s) %v", context, r), stack)
+	}
 
 	_, _ = fmt.Fprintf(os.Stderr, "\n=== ELING PANIC [%s] ===\n%v\nStack:\n%s\n==========================\n", context, r, stack)
 	return true

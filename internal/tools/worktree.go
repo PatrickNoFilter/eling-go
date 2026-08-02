@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"time"
 	"strings"
 )
 
@@ -78,36 +79,40 @@ func init() {
 	create := Tool{
 		Name:        "worktree_create",
 		Description: "Create an isolated git worktree for experimentation. Worktrees live under ~/.eling/worktrees/ so experiments never touch the main tree. Args: name (required), base_branch (optional, defaults to current branch).",
-		Version:     "1.0.0",
+		Version:     "1.1.0", // git ops with registry timeout
 		Category:    "system",
 		Execute:     worktreeCreate,
+		Timeout:     60 * time.Second,
 	}
 	DefaultRegistry.Register(create)
 
 	list := Tool{
 		Name:        "worktree_list",
 		Description: "List all git worktrees with their branch, path, and HEAD.",
-		Version:     "1.0.0",
+		Version:     "1.1.0", // git ops with registry timeout
 		Category:    "system",
 		Execute:     worktreeList,
+		Timeout:     60 * time.Second,
 	}
 	DefaultRegistry.Register(list)
 
 	remove := Tool{
 		Name:        "worktree_remove",
 		Description: "Remove a worktree by name (cleans up the branch and directory). Args: name (required).",
-		Version:     "1.0.0",
+		Version:     "1.1.0", // git ops with registry timeout
 		Category:    "system",
 		Execute:     worktreeRemove,
+		Timeout:     60 * time.Second,
 	}
 	DefaultRegistry.Register(remove)
 
 	merge := Tool{
 		Name:        "worktree_merge",
 		Description: "Merge a worktree's branch back into the main tree and remove the worktree. Args: name (required), target (optional branch, default current).",
-		Version:     "1.0.0",
+		Version:     "1.1.0", // git ops with registry timeout
 		Category:    "system",
 		Execute:     worktreeMerge,
+		Timeout:     60 * time.Second,
 	}
 	DefaultRegistry.Register(merge)
 }

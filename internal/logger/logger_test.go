@@ -137,16 +137,16 @@ func TestCrashDetection(t *testing.T) {
 func TestWriteCrashReport(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Override home dir temporarily
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	// Redirect crash paths to a temp dir so the test does not pollute the
+	// real ~/.eling/crash_report.log.
+	SetCrashPathsForTesting(tmpDir)
+	defer ResetCrashPathsForTesting()
 
 	// Write crash report
 	WriteCrashReport("test error", "test stack trace")
 
 	// Check crash report file
-	crashPath := filepath.Join(tmpDir, ".eling", "crash_report.log")
+	crashPath := filepath.Join(tmpDir, "crash_report.log")
 	data, err := os.ReadFile(crashPath)
 	if err != nil {
 		t.Fatalf("Failed to read crash report: %v", err)
@@ -164,6 +164,11 @@ func TestWriteCrashReport(t *testing.T) {
 func TestSafePanicRecover(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "safe.log")
+
+	// Redirect crash paths to tmpDir so the intentional panic below does not
+	// pollute the real ~/.eling/crash_report.log (same as TestWriteCrashReport).
+	SetCrashPathsForTesting(tmpDir)
+	defer ResetCrashPathsForTesting()
 
 	l, err := New(logPath)
 	if err != nil {

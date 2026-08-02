@@ -32,15 +32,23 @@ import (
 // can substitute a fake upstream provider (httptest) without real credentials.
 type AgentFactory func(cfg *config.Config) (*agent.Agent, error)
 
+// sessionAgent wraps a live agent with a per-session run lock. It serializes
+// AskStream turns so two concurrent HTTP requests for the same session_id
+// can never interleave tool execution or session-history writes.
+type sessionAgent struct {
+	agent *agent.Agent
+	runMu sync.Mutex
+}
+
 // Server is the HTTP daemon.
 type Server struct {
-	cfg     *config.Config
-	version string
-	token   string
+	cfg      *config.Config
+	version  string
+	token    string
 	newAgent AgentFactory
 
 	mu     sync.Mutex
-	agents map[string]*agent.Agent // sessionID -> live agent
+	agents map[string]*sessionAgent // sessionID -> live agent + run lock
 
 	httpSrv *http.Server
 }
@@ -55,7 +63,7 @@ func NewServer(cfg *config.Config, version string, factory AgentFactory) *Server
 		version:  version,
 		token:    cfg.Server.Token,
 		newAgent: factory,
-		agents:   make(map[string]*agent.Agent),
+		agents:   make(map[string]*sessionAgent),
 	}
 }
 
@@ -93,8 +101,8 @@ func (s *Server) Serve(addr string) error {
 // Shutdown gracefully stops the daemon and kills all agent sessions.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
-	for id, a := range s.agents {
-		if err := a.SaveState(); err != nil {
+	for id, sa := range s.agents {
+		if err := sa.agent.SaveState(); err != nil {
 			log.Printf("server: save state for session %s: %v", id, err)
 		}
 	}
@@ -170,12 +178,13 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.mu.Lock()
-	a, ok := s.agents[id]
+	sa, ok := s.agents[id]
 	s.mu.Unlock()
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": "session not found: " + id})
 		return
 	}
+	a := sa.agent
 	entries, ok := a.Sessions.GetEntriesCopy(a.SessionName())
 	if !ok {
 		// fall back to scanning saved sessions
@@ -205,11 +214,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ag, err := s.agentFor(req.SessionID)
+	sa, err := s.agentFor(req.SessionID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 		return
 	}
+
+	// Serialize turns per session: a second concurrent request for the same
+	// session_id waits here until the in-flight turn finishes. This prevents
+	// interleaved tool execution and session-history writes.
+	sa.runMu.Lock()
+	defer sa.runMu.Unlock()
+	ag := sa.agent
 
 	// SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -262,16 +278,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 // ── session/agent management ────────────────────────────────────────────────
 
-// agentFor returns the live agent for sessionID, creating one if needed.
+// agentFor returns the live sessionAgent for sessionID, creating one if needed.
 // Empty sessionID gets a fresh server-managed id.
-func (s *Server) agentFor(sessionID string) (*agent.Agent, error) {
+func (s *Server) agentFor(sessionID string) (*sessionAgent, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		sessionID = fmt.Sprintf("srv_%d", time.Now().UnixNano())
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if a, ok := s.agents[sessionID]; ok {
-		return a, nil
+	if sa, ok := s.agents[sessionID]; ok {
+		return sa, nil
 	}
 	a, err := s.newAgent(s.cfg)
 	if err != nil {
@@ -280,8 +296,9 @@ func (s *Server) agentFor(sessionID string) (*agent.Agent, error) {
 	if err := a.LoadState(); err != nil {
 		log.Printf("server: no prior state for %s: %v", sessionID, err)
 	}
-	s.agents[sessionID] = a
-	return a, nil
+	sa := &sessionAgent{agent: a}
+	s.agents[sessionID] = sa
+	return sa, nil
 }
 
 // activeSessionIDs returns sorted live session ids.

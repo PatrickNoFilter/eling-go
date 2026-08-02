@@ -170,7 +170,7 @@ func recoverWithStack(ag *agent.Agent) {
 	}
 }
 
-const Version = "0.3.1"
+const Version = "0.4.0"
 
 func main() {
 	apiKey := flag.String("api-key", "", "DeepSeek API key (or set DEEPSEEK_API_KEY env var)")
@@ -394,7 +394,7 @@ func main() {
 	// Plan mode: CLI flag overrides config; enables the draft-then-approve
 	// gate. The TUI attaches an interactive PlanApprover per submit; the
 	// non-interactive CLI auto-approves (nil approver).
-	ag.PlanEnabled = *planMode || cfg.Agent.PlanMode
+	ag.PlanEnabled.Store(*planMode || cfg.Agent.PlanMode)
 
 	// Initialize the 8-layer memory Brain and attach it to the agent.
 	// This enables all 15 lifecycle hooks during conversation.
@@ -616,127 +616,147 @@ func main() {
 			<-sigCh
 			replCancel()
 		}()
+		// Read stdin in a background goroutine so SIGINT (Ctrl+C) can exit
+		// immediately — scanner.Scan() blocks and can't be interrupted from
+		// the signal handler.
+		lines := make(chan string, 1)
+		go func() {
+			for scanner.Scan() {
+				lines <- scanner.Text()
+			}
+			close(lines)
+		}()
 		for {
 			fmt.Print(">>> ")
-			if !scanner.Scan() {
-				break
-			}
-			input := scanner.Text()
-			input = strings.TrimSpace(input)
-			if input == "" {
-				continue
-			}
-
-			if strings.HasPrefix(input, "/") {
-				parts := strings.Fields(input)
-				cmd := strings.ToLower(parts[0])
-				switch cmd {
-				case "/quit", "/exit":
-					fmt.Println("Bye!")
+			select {
+			case <-replCtx.Done():
+				fmt.Println("\nBye!")
+				goto replDone
+			case line, ok := <-lines:
+				if !ok {
 					goto replDone
-				case "/help":
-					fmt.Println("  /help      - Show this help")
-					fmt.Println("  /stats     - Show agent stats")
-					fmt.Println("  /tools     - List available tools")
-					fmt.Println("  /skills    - List learned skills")
-					fmt.Println("  /memory    - Show recent memories")
-					fmt.Println("  /recall <q>- Search memories")
-					fmt.Println("  /plan      - Toggle plan mode (draft + approve before tools)")
-					fmt.Println("  /save      - Save state")
-					fmt.Println("  /session   - Show session info")
-					fmt.Println("  /providers - List providers")
-					fmt.Println("  /quit      - Exit")
-					fmt.Println("  /clear     - Clear screen")
-				case "/stats":
-					for k, v := range ag.GetStats() {
-						fmt.Printf("  %s: %v\n", k, v)
-					}
-				case "/tools":
-					for _, t := range ag.ListTools() {
-						fmt.Printf("  %s - %s\n", t.Name, agent.TruncateStr(t.Description, 60))
-					}
-				case "/skills":
-					skills := ag.ListSkills()
-					if len(skills) == 0 {
-						fmt.Println("  no skills registered")
-					} else {
-						fmt.Println("  Skills:")
-						for _, sk := range skills {
-							fmt.Printf("  - %s: %s\n", sk.Name, agent.TruncateStr(sk.Description, 60))
-						}
-					}
-				case "/memory":
-					items := ag.GetMemory().Recent(5)
-					if len(items) == 0 {
-						fmt.Println("  no memories")
-					} else {
-						for _, it := range items {
-							fmt.Printf("  [%s] %s\n", it.Category, agent.TruncateStr(it.Content, 60))
-						}
-					}
-				case "/recall":
-					q := strings.Join(parts[1:], " ")
-					if q == "" {
-						fmt.Println("  usage: /recall <query>")
-					} else {
-						for _, it := range ag.GetMemory().Recall(q) {
-							fmt.Printf("  [%s] %s\n", it.Category, agent.TruncateStr(it.Content, 80))
-						}
-					}
-				case "/plan":
-					on := strings.ToLower(strings.Join(parts[1:], " "))
-					switch on {
-					case "on", "1", "yes":
-						ag.PlanEnabled = true
-						fmt.Println("  plan mode: ON (drafts a plan for approval each turn; auto-approves in REPL)")
-					case "off", "0", "no":
-						ag.PlanEnabled = false
-						fmt.Println("  plan mode: OFF")
-					default:
-						ag.PlanEnabled = !ag.PlanEnabled
-						fmt.Printf("  plan mode: %v\n", map[bool]string{true: "ON", false: "OFF"}[ag.PlanEnabled])
-					}
-				case "/save":
-					if err := ag.SaveState(); err != nil {
-						fmt.Printf("  Error saving: %v\n", err)
-					} else {
-						fmt.Println("  saved")
-					}
-				case "/session":
-					s := ag.GetSession()
-					if s != nil {
-						fmt.Printf("  %s | %d messages\n", s.Name, len(s.Entries))
-					} else {
-						fmt.Println("  no active session")
-					}
-				case "/providers":
-					for _, p := range ag.ListProviders() {
-						fmt.Printf("  - %s\n", p)
-					}
-				case "/clear":
-					fmt.Print("\033[H\033[2J")
-				default:
-					fmt.Printf("  Unknown command %s (try /help)\n", cmd)
 				}
-				continue
-			}
+				input := strings.TrimSpace(line)
+				if input == "" {
+					continue
+				}
 
-			// Show spinner while waiting
-			s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
-			s.Suffix = " thinking..."
-			s.Start()
-			response, askErr := func() (string, error) {
-				defer recoverWithStack(ag)
-				return ag.Ask(replCtx, input)
-			}()
-			s.Stop()
-			if askErr != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", askErr)
-				continue
+				if strings.HasPrefix(input, "/") {
+					parts := strings.Fields(input)
+					cmd := strings.ToLower(parts[0])
+					switch cmd {
+					case "/quit", "/exit":
+						fmt.Println("Bye!")
+						goto replDone
+					case "/help":
+						fmt.Println("  /help      - Show this help")
+						fmt.Println("  /stats     - Show agent stats")
+						fmt.Println("  /tools     - List available tools")
+						fmt.Println("  /skills    - List learned skills")
+						fmt.Println("  /memory    - Show recent memories")
+						fmt.Println("  /recall <q>- Search memories")
+						fmt.Println("  /plan      - Toggle plan mode (draft + approve before tools)")
+						fmt.Println("  /save      - Save state")
+						fmt.Println("  /session   - Show session info")
+						fmt.Println("  /providers - List providers")
+						fmt.Println("  /quit      - Exit")
+						fmt.Println("  /clear     - Clear screen")
+					case "/stats":
+						for k, v := range ag.GetStats() {
+							fmt.Printf("  %s: %v\n", k, v)
+						}
+					case "/tools":
+						for _, t := range ag.ListTools() {
+							fmt.Printf("  %s - %s\n", t.Name, agent.TruncateStr(t.Description, 60))
+						}
+					case "/skills":
+						skills := ag.ListSkills()
+						if len(skills) == 0 {
+							fmt.Println("  no skills registered")
+						} else {
+							fmt.Println("  Skills:")
+							for _, sk := range skills {
+								fmt.Printf("  - %s: %s\n", sk.Name, agent.TruncateStr(sk.Description, 60))
+							}
+						}
+					case "/memory":
+						items := ag.GetMemory().Recent(5)
+						if len(items) == 0 {
+							fmt.Println("  no memories")
+						} else {
+							for _, it := range items {
+								fmt.Printf("  [%s] %s\n", it.Category, agent.TruncateStr(it.Content, 60))
+							}
+						}
+					case "/recall":
+						q := strings.Join(parts[1:], " ")
+						if q == "" {
+							fmt.Println("  usage: /recall <query>")
+						} else {
+							for _, it := range ag.GetMemory().Recall(q) {
+								fmt.Printf("  [%s] %s\n", it.Category, agent.TruncateStr(it.Content, 80))
+							}
+						}
+					case "/plan":
+						on := strings.ToLower(strings.Join(parts[1:], " "))
+						switch on {
+						case "on", "1", "yes":
+							ag.PlanEnabled.Store(true)
+							fmt.Println("  plan mode: ON (drafts a plan for approval each turn; auto-approves in REPL)")
+						case "off", "0", "no":
+							ag.PlanEnabled.Store(false)
+							fmt.Println("  plan mode: OFF")
+						default:
+							ag.PlanEnabled.Store(!ag.PlanEnabled.Load())
+							fmt.Printf("  plan mode: %v\n", map[bool]string{true: "ON", false: "OFF"}[ag.PlanEnabled.Load()])
+						}
+					case "/save":
+						if err := ag.SaveState(); err != nil {
+							fmt.Printf("  Error saving: %v\n", err)
+						} else {
+							fmt.Println("  saved")
+						}
+					case "/session":
+						s := ag.GetSession()
+						if s != nil {
+							fmt.Printf("  %s | %d messages\n", s.Name, len(s.Entries))
+						} else {
+							fmt.Println("  no active session")
+						}
+					case "/providers":
+						for _, p := range ag.ListProviders() {
+							fmt.Printf("  - %s\n", p)
+						}
+					case "/clear":
+						fmt.Print("\033[H\033[2J")
+					default:
+						fmt.Printf("  Unknown command %s (try /help)\n", cmd)
+					}
+					continue
+				}
+
+				// Show spinner while waiting
+				s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+				s.Suffix = " thinking..."
+				s.Start()
+				response, askErr := func() (string, error) {
+					defer recoverWithStack(ag)
+					return ag.Ask(replCtx, input)
+				}()
+				s.Stop()
+				if askErr != nil {
+					if replCtx.Err() != nil {
+						// Interrupted (SIGINT) mid-turn: exit quietly.
+						fmt.Println("\nBye!")
+						goto replDone
+					}
+					fmt.Fprintf(os.Stderr, "Error: %v\n", askErr)
+					continue
+				}
+				fmt.Println()
+				fmt.Println(response)
+				fmt.Println()
 			}
-			fmt.Println()
-			fmt.Println(response)
-			fmt.Println()
 		}
 	replDone:
 	}

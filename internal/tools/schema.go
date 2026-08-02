@@ -1,5 +1,10 @@
 package tools
 
+import (
+	"os"
+	"strings"
+)
+
 // ToolDef mirrors the OpenAI/DeepSeek "tools" function-calling schema.
 type ToolDef struct {
 	Type     string       `json:"type"`
@@ -36,7 +41,7 @@ var paramSchemas = map[string]map[string]interface{}{
 		"required": []string{"name"},
 	},
 	"worktree_list": {
-		"type": "object",
+		"type":       "object",
 		"properties": map[string]interface{}{},
 	},
 	"worktree_remove": {
@@ -227,12 +232,38 @@ func defaultSchema() map[string]interface{} {
 	}
 }
 
+// ToolAllowlist returns a set of tool names to advertise, or nil when
+// ELING_TOOLS is unset (no filtering). Setting ELING_TOOLS to a comma-
+// separated list (e.g. "read_file,write_file,edit_file,bash") shrinks the
+// function-calling prompt dramatically — essential for small-context local
+// models like llama-server where the full tool schema alone can exceed the
+// context window.
+func ToolAllowlist() map[string]bool {
+	raw := os.Getenv("ELING_TOOLS")
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	set := make(map[string]bool)
+	for _, n := range strings.Split(raw, ",") {
+		n = strings.TrimSpace(n)
+		if n != "" {
+			set[n] = true
+		}
+	}
+	return set
+}
+
 // ToProviderDefs converts registry tools into the function-calling format
 // the provider (DeepSeek/OpenAI-compatible) API expects.
+// When ELING_TOOLS is set, only the listed tools are advertised.
 func (r *Registry) ToProviderDefs() []ToolDef {
+	allow := ToolAllowlist()
 	list := r.List()
 	defs := make([]ToolDef, 0, len(list))
 	for _, t := range list {
+		if allow != nil && !allow[t.Name] {
+			continue
+		}
 		schema, ok := paramSchemas[t.Name]
 		if !ok {
 			schema = defaultSchema()

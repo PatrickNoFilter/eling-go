@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -102,11 +103,42 @@ func init() {
 	bashTool := Tool{
 		Name:        "bash",
 		Description: "Execute a bash command and return its output. Use for running scripts, compilation, file operations, git, etc.",
-		Version:     "1.0.0",
+		Version:     "1.2.0", // ctx-aware: turn deadline / Ctrl+C kills the command group; registry hard cap
 		Category:    "system",
 		Execute:     bashExecute,
+		ExecuteCtx:  bashExecuteCtx,
+		// Absolute catastrophic cap. bash already applies its own default 30s
+		// timeout (or an explicit `timeout` arg), so this 10-min budget only
+		// stops a misconfigured huge explicit timeout from stalling the agent.
+		Timeout: 10 * time.Minute,
 	}
 	DefaultRegistry.Register(bashTool)
+}
+
+// bashExecuteCtx is the context-aware variant of bashExecute. It runs the
+// command through the normal path (own timeout + process-group kill) but also
+// aborts it the moment the caller's context is cancelled — e.g. the turn
+// deadline (max_turn_duration) or Ctrl+C. This closes the gap where a command
+// with a large explicit `timeout` argument could otherwise outlive the turn.
+func bashExecuteCtx(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	type bashResult struct {
+		result interface{}
+		err    error
+	}
+	done := make(chan bashResult, 1)
+	go func() {
+		r, err := bashExecute(args)
+		done <- bashResult{r, err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Kills every tracked tool process (bash, curl, ...) with SIGKILL.
+		KillRunningTools()
+		return nil, fmt.Errorf("bash aborted: %v", ctx.Err())
+	case res := <-done:
+		return res.result, res.err
+	}
 }
 
 // bashExecute runs a bash command with timeout protection.

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -15,10 +16,14 @@ func init() {
 	webSearchTool := Tool{
 		Name:        "web_search",
 		Description: "Search the web using DuckDuckGo or Bing. Returns a list of results with titles, URLs, and snippets.",
-		Version:     "2.1.0", // timeout prediction: preflight + adaptive max-time + context cancel
+		Version:     "2.4.0", // dns cache + --resolve skip-dns + adaptive max-time + ctx-cancel + Ctrl+C kill + registry budget
 		Category:    "system",
 		Execute:     webSearchExecute,
 		ExecuteCtx:  webSearchExecuteCtx,
+		// Registry-level budget: adaptive per-host max-time is 4-8s; the 30s
+		// cap bounds the full fallback chain (html -> lite) so a slow search
+		// engine cannot stall the turn.
+		Timeout: 30 * time.Second,
 	}
 	DefaultRegistry.Register(webSearchTool)
 
@@ -26,10 +31,11 @@ func init() {
 	webFetchTool := Tool{
 		Name:        "web_fetch",
 		Description: "Fetch the content of a URL and return it as text. Supports http/https URLs.",
-		Version:     "2.1.0", // timeout prediction: preflight + adaptive max-time + context cancel
+		Version:     "2.4.0", // dns cache + --resolve skip-dns + adaptive max-time + ctx-cancel + Ctrl+C kill + registry budget
 		Category:    "system",
 		Execute:     webFetchExecute,
 		ExecuteCtx:  webFetchExecuteCtx,
+		Timeout:     30 * time.Second,
 	}
 	DefaultRegistry.Register(webFetchTool)
 }
@@ -76,10 +82,17 @@ func curlGet(targetURL string, headers ...string) (string, error) {
 // parent deadline or user interrupt aborts the fetch instead of blocking.
 func curlGetCtx(ctx context.Context, targetURL string, headers ...string) (string, error) {
 	host := hostOf(targetURL)
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL %q: %w", targetURL, err)
+	}
+	hostname := u.Hostname()
 
-	// 1) Timeout prediction: preflight DNS + TCP so dead hosts fail in ~1.5s
-	//    instead of hanging until curl's --max-time.
-	if err := predictor.preflightReachable(targetURL, preflightTimeout); err != nil {
+	// 1) Timeout prediction: fast DNS + TCP preflight so dead hosts fail in
+	//    ~1s instead of hanging until curl's --max-time. The returned IPs are
+	//    handed to curl via --resolve so curl skips its own DNS lookup.
+	ips, err := predictor.preflightReachable(targetURL, preflightTimeout)
+	if err != nil {
 		return "", err
 	}
 
@@ -87,9 +100,30 @@ func curlGetCtx(ctx context.Context, targetURL string, headers ...string) (strin
 	maxTime := predictor.adaptiveMaxTime(host)
 	start := time.Now()
 
-	args := []string{"-sL", "--connect-timeout", "3",
+	args := []string{"-sL", "--connect-timeout", "2",
 		"--max-time", fmt.Sprintf("%d", int(maxTime.Seconds())),
 		"--max-filesize", "1M", "--speed-limit", "100", "--speed-time", "3"}
+
+	// 3) Skip curl's DNS lookup using the preflight-resolved IPs. This halves
+	//    the network round trips per fetch (one DNS instead of two).
+	if len(ips) > 0 {
+		port := u.Port()
+		if port == "" {
+			if u.Scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+		}
+		parts := make([]string, 0, len(ips))
+		for _, ip := range ips {
+			if strings.Contains(ip, ":") { // IPv6 needs brackets in --resolve
+				ip = "[" + ip + "]"
+			}
+			parts = append(parts, ip)
+		}
+		args = append(args, "--resolve", hostname+":"+port+":"+strings.Join(parts, ","))
+	}
 
 	// Add headers
 	for _, h := range headers {
@@ -114,13 +148,18 @@ func curlGetCtx(ctx context.Context, targetURL string, headers ...string) (strin
 
 	// CommandContext kills curl the moment ctx is cancelled.
 	cmd := exec.CommandContext(ctx, "curl", args...)
+	// Give curl its own process group and track it so Ctrl+C /
+	// KillRunningTools() also aborts in-flight web fetches, not just bash.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	trackCmd(cmd)
+	defer untrackCmd(cmd)
 	// Limit output to prevent OOM from huge pages
 	stdout := newLimitedBuffer(maxBashOutputBytes)
 	stderr := newLimitedBuffer(maxBashOutputBytes)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	elapsed := time.Since(start)
 	predictor.recordResult(host, elapsed, err)
 

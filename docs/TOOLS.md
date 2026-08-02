@@ -4,6 +4,38 @@ Complete documentation for all 22+ built-in tools available in ELING's dynamic t
 
 ---
 
+## ⏱ Timeout Strategy (v0.4.0)
+
+Every tool has a **hard wall-clock budget** — no tool can hang the agent forever:
+
+| Tool | Budget | Notes |
+|------|--------|-------|
+| `read` | 20 s | aborts mid-read on turn deadline / Ctrl+C; **64 MiB size cap** |
+| `write` / `edit` / `ls` | 15 s | local disk ops |
+| `grep` | 20 s | internal 10 s command timeout already |
+| `web_search` / `web_fetch` | 30 s | adaptive per-host curl `--max-time` (4–8 s) + fallback chain |
+| `bash` | 10 min | absolute cap; own default is 30 s (`timeout_sec`) |
+| `ocr_review` / `ocr_scan` | 5 min | override via `tool_timeout_sec` arg |
+| `ocr_health` | 60 s | version + LLM ping only |
+| `worktree_*` | 60 s | git operations |
+| `create_backup` / `codebase-intelligence` | 2 min | zip / multi-step graph queries |
+| `semantic_search` / `semantic_index` | 30 s | embeddings may hit a remote API |
+| `eling_setup` | 60 s | runs the setup script |
+| `register_tool` | 30 s | dynamic registration |
+| *any other tool* | 5 min | `DefaultToolTimeout` fallback |
+
+**How it works:**
+- The caller's turn deadline (e.g. `max_duration`) **always wins** — if it fires
+  earlier, tools are aborted at that point.
+- Context-aware tools (web, bash, ocr, read) receive a context carrying the
+  budget and **cancel mid-flight** (curl/ocr killed via `CommandContext`).
+- Plain tools run under a goroutine + timer guard; on expiry any tracked
+  subprocesses are SIGKILLed and a timeout error is returned.
+- If a tool exceeds its budget, the agent gets a clear error
+  (`tool X timed out after …`) instead of blocking the turn indefinitely.
+
+---
+
 ## 🔧 System Tools
 
 ### `bash`
@@ -42,6 +74,12 @@ Read file contents with line number limits.
 | `start_line` | number | ❌ | 0 | Starting line (0-indexed) |
 
 **Output:** File contents as plain text.
+
+**Limits:**
+- **64 MiB size cap** — files larger than this are refused up front with an
+  actionable error (use `grep` / `ls` / `max_lines` instead), so a multi-GB log
+  can never stall the agent.
+- 20 s hard budget; the read aborts immediately on turn deadline / Ctrl+C.
 
 **Example:**
 ```
@@ -366,6 +404,12 @@ Run OpenCodeReview on git changes.
 | `max_tools` | number | ❌ | Max tool rounds |
 | `max_git_procs` | number | ❌ | Max git processes |
 | `preview` | boolean | ❌ | Preview only |
+| `tool_timeout_sec` | number | ❌ | 300 | Whole-call hard budget (default 5 min) |
+
+**Limits:** The entire `ocr_review` call is killed after **5 minutes** by
+default (override with `tool_timeout_sec`). Per-file progress is bounded by
+`timeout_minutes`. This prevents a slow review LLM from hanging the turn —
+the command is killed via `CommandContext` the moment the budget expires.
 
 ### `ocr_scan`
 Full-file scan of entire directories.

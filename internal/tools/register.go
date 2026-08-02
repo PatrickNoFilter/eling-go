@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 // DynamicTool tracks a tool that was registered at runtime (by the LLM or
@@ -82,9 +83,10 @@ func init() {
 			"The tool wraps a bash command. Provide name, description, and either command or inline script. " +
 			"Use type='skill' to register as a skill (appears in skill list). " +
 			"Use type='tool' (default) to register as a dynamic tool.",
-		Version:  "1.0.0",
+		Version:  "1.1.0", // registry timeout budget
 		Category: "system",
 		Execute:  registerToolExecute,
+		Timeout:  30 * time.Second,
 	})
 }
 

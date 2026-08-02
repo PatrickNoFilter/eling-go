@@ -13,17 +13,19 @@ func init() {
 	DefaultRegistry.Register(Tool{
 		Name:        "create_backup",
 		Description: "Create a timestamped ZIP backup of the entire eling project, excluding the compiled binary and any existing backup zips.",
-		Version:     "1.0.0",
+		Version:     "1.1.0", // registry timeout budget
 		Category:    "system",
 		Execute:     backupExecute,
+		Timeout:     2 * time.Minute, // zipping a large tree can take a while
 	})
 
 	DefaultRegistry.Register(Tool{
 		Name:        "codebase-intelligence",
 		Description: "Advanced codebase analysis and intelligence skill. Leverages codebase-memory-mcp knowledge graph for: architecture discovery, call graph tracing, impact analysis, dead code detection, cross-service HTTP linking, semantic code search, and architecture decision records. Use this skill when you need deep understanding of a codebase - its structure, dependencies, data flow, and architectural patterns. The skill orchestrates multiple graph tools: search_graph, trace_path, query_graph, get_architecture, detect_changes, and more.",
-		Version:     "1.0.0",
+		Version:     "1.1.0", // registry timeout budget
 		Category:    "system",
 		Execute:     codebaseIntelligenceExecute,
+		Timeout:     2 * time.Minute, // multi-step graph queries
 	})
 }
 

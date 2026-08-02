@@ -68,7 +68,7 @@ func planTestAgent(t *testing.T, ts *httptest.Server) *Agent {
 func TestPlanModeRejectAbortsBeforeTools(t *testing.T) {
 	ts, calls := mockPlanServer(t)
 	ag := planTestAgent(t, ts)
-	ag.PlanEnabled = true
+	ag.PlanEnabled.Store(true)
 	ag.PlanApprover = func(string) PlanVerdict { return PlanReject }
 
 	out, err := ag.Ask(context.Background(), "deploy the service")
@@ -88,7 +88,7 @@ func TestPlanModeRejectAbortsBeforeTools(t *testing.T) {
 func TestPlanModeApprovePersistsAndExecutes(t *testing.T) {
 	ts, calls := mockPlanServer(t)
 	ag := planTestAgent(t, ts)
-	ag.PlanEnabled = true
+	ag.PlanEnabled.Store(true)
 	ag.PlanApprover = func(string) PlanVerdict { return PlanApprove }
 
 	out, err := ag.Ask(context.Background(), "deploy the service")
@@ -115,7 +115,7 @@ func TestPlanModeApprovePersistsAndExecutes(t *testing.T) {
 func TestPlanModeSkipContinuesWithoutPlan(t *testing.T) {
 	ts, calls := mockPlanServer(t)
 	ag := planTestAgent(t, ts)
-	ag.PlanEnabled = true
+	ag.PlanEnabled.Store(true)
 	ag.PlanApprover = func(string) PlanVerdict { return PlanSkip }
 
 	out, err := ag.Ask(context.Background(), "deploy the service")

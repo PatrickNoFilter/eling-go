@@ -463,9 +463,10 @@ func init() {
 			"find conceptually related items even when exact keywords don't match. " +
 			"Results are ranked by relevance score (0.0–1.0). " +
 			"Use this when you need to find information by meaning rather than exact text.",
-		Version:  "1.0.0",
+		Version:  "1.1.0", // registry timeout budget
 		Category: "system",
 		Execute:  semanticSearchExecute,
+		Timeout:  30 * time.Second, // embedding + cosine over memory index
 	})
 
 	DefaultRegistry.Register(Tool{
@@ -474,9 +475,10 @@ func init() {
 			"optional category, tags, and metadata. The content will be vector-embedded and " +
 			"made available for future semantic_search queries. Use this to build up a " +
 			"searchable knowledge base of concepts, summaries, or important information.",
-		Version:  "1.0.0",
+		Version:  "1.1.0", // registry timeout budget
 		Category: "system",
 		Execute:  semanticIndexExecute,
+		Timeout:  30 * time.Second, // embedding may call a remote API
 	})
 }
 

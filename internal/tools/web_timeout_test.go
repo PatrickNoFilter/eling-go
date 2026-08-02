@@ -85,12 +85,67 @@ func TestPreflightReachable(t *testing.T) {
 	p := newFetchPredictor()
 	// A dead host on a non-routable address should fail fast (< preflight budget).
 	start := time.Now()
-	err := p.preflightReachable("http://10.255.255.1:81/", preflightTimeout)
+	_, err := p.preflightReachable("http://10.255.255.1:81/", preflightTimeout)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Log("note: 10.255.255.1 unexpectedly reachable, skipping fast-fail assertion")
 	} else if elapsed > 3*time.Second {
 		t.Errorf("preflight took %v, expected fast fail (< 3s)", elapsed)
+	}
+}
+
+func TestDNSLookupCaches(t *testing.T) {
+	p := newFetchPredictor()
+
+	// First lookup populates the cache.
+	ips1, err := p.dnsLookup("example.com", preflightTimeout)
+	if err != nil {
+		t.Skipf("no network: %v", err)
+	}
+	if len(ips1) == 0 {
+		t.Fatal("expected at least one IP for example.com")
+	}
+
+	// Second lookup must be served from cache without touching the network.
+	p.mu.Lock()
+	_, cached := p.dnsCache["example.com"]
+	p.mu.Unlock()
+	if !cached {
+		t.Fatal("expected example.com to be in the DNS cache")
+	}
+
+	start := time.Now()
+	ips2, err := p.dnsLookup("example.com", preflightTimeout)
+	if err != nil {
+		t.Fatalf("cached lookup failed: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Errorf("cached DNS lookup took %v, expected < 50ms", elapsed)
+	}
+	if len(ips2) == 0 || ips2[0] != ips1[0] {
+		t.Errorf("cached IPs mismatch: %v vs %v", ips2, ips1)
+	}
+}
+
+func TestKnownReachableSkipsTCPProbe(t *testing.T) {
+	p := newFetchPredictor()
+	// Mark a host as known reachable and failing 0 times.
+	p.mu.Lock()
+	p.hostOK["example.com"] = true
+	p.mu.Unlock()
+
+	// With knownOK and no failures, preflight must skip the TCP probe and
+	// return (possibly cached) IPs immediately.
+	start := time.Now()
+	ips, err := p.preflightReachable("https://example.com/", preflightTimeout)
+	if err != nil {
+		t.Fatalf("known-reachable preflight failed: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("known-reachable preflight took %v, expected < 500ms", elapsed)
+	}
+	if len(ips) == 0 {
+		t.Log("note: no cached IPs (first fetch), but probe was skipped")
 	}
 }
 

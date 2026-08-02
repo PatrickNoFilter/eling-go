@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"eling/internal/config"
 )
@@ -242,5 +244,62 @@ func TestSessionNotFound(t *testing.T) {
 	s.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/sessions/nope", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestChatSameSessionSerialized verifies the per-session run lock: when
+// multiple /v1/chat requests hit the same session_id concurrently, their
+// agent turns must be serialized — the upstream provider must never see
+// more than one in-flight chat/completions call for that session.
+func TestChatSameSessionSerialized(t *testing.T) {
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+		}()
+
+		// Widen the race window so overlapping turns would be caught.
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"id":"m1","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{"role":"assistant","content":"pong"}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(ts.Close)
+
+	cfg := serverTestConfig(t, ts)
+	s := NewServer(cfg, "test-version", nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rec := doChat(t, s.Handler(), "sess-serial", fmt.Sprintf("msg %d", i), "")
+			if rec.Code != http.StatusOK {
+				t.Errorf("turn %d status = %d, want 200", i, rec.Code)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if maxInFlight != 1 {
+		t.Fatalf("max concurrent provider calls = %d, want 1 (turns must be serialized per session)", maxInFlight)
+	}
+	if got := s.activeSessionIDs(); len(got) != 1 || got[0] != "sess-serial" {
+		t.Errorf("active sessions = %v, want [sess-serial]", got)
 	}
 }

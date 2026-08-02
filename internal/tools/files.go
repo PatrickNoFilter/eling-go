@@ -19,9 +19,11 @@ func init() {
 	DefaultRegistry.Register(Tool{
 		Name:        "read",
 		Description: "Read the contents of a file. Supports text files, JSON, and source code.",
-		Version:     "1.0.0",
+		Version:     "1.1.0", // timeout-aware + 64 MiB size guard
 		Category:    "system",
 		Execute:     readExecute,
+		ExecuteCtx:  readExecuteCtx,
+		Timeout:     readToolTimeout,
 	})
 
 	// Register write tool
@@ -31,6 +33,7 @@ func init() {
 		Version:     "1.1.0",
 		Category:    "system",
 		Execute:     writeExecute,
+		Timeout:     fileToolTimeout,
 	})
 
 	// Register edit tool (like jcode's edit)
@@ -40,6 +43,7 @@ func init() {
 		Version:     "1.1.0",
 		Category:    "system",
 		Execute:     editExecute,
+		Timeout:     fileToolTimeout,
 	})
 
 	// Register ls tool (like jcode's ls)
@@ -49,6 +53,7 @@ func init() {
 		Version:     "1.0.0",
 		Category:    "system",
 		Execute:     lsExecute,
+		Timeout:     fileToolTimeout,
 	})
 
 	// Register grep tool (code search, like jcode's agentgrep)
@@ -58,10 +63,74 @@ func init() {
 		Version:     "1.0.0",
 		Category:    "system",
 		Execute:     grepExecute,
+		Timeout:     grepToolTimeout,
 	})
 }
 
+// Tool timeout budgets for file operations. These are enforced by the
+// registry's ExecuteContext; the read tool additionally cancels mid-read via
+// its ExecuteCtx variant (turn deadline / Ctrl+C abort immediately).
+const (
+	fileToolTimeout = 15 * time.Second // write / edit / ls — local disk ops
+	readToolTimeout = 20 * time.Second // read — allows large-file streaming
+	grepToolTimeout = 20 * time.Second // grep — already has 10s internal ctx
+)
+
+// maxReadBytes caps a single read to 64 MiB. Reading a multi-GB log into RAM
+// is both slow (the user's complaint) and OOM-risky on 8 GB phones. Files
+// larger than this get an actionable error instead of a hang.
+const maxReadBytes = 64 << 20 // 64 MiB
+
 func readExecute(args map[string]interface{}) (interface{}, error) {
+	return readExecuteCtx(context.Background(), args)
+}
+
+// readExecuteCtx is the context-aware read. It enforces the same behaviour as
+// readExecute but can be aborted the moment the caller's context is cancelled
+// (turn deadline, Ctrl+C, or the registry's readToolTimeout budget) — even
+// when os.ReadFile is blocked on a slow filesystem or special file.
+func readExecuteCtx(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	path, _ := args["file_path"].(string)
+	if path == "" {
+		path, _ = args["path"].(string)
+	}
+	if path == "" {
+		return Err("path is required"), nil
+	}
+
+	// Timeout strategy part 1: refuse oversized files BEFORE reading them so
+	// we never spend minutes slurping a multi-GB log into RAM. The cap is
+	// generous (64 MiB) — plenty for source/config/docs.
+	if fi, err := os.Stat(path); err == nil {
+		if fi.Mode().IsRegular() && fi.Size() > maxReadBytes {
+			return nil, fmt.Errorf("read %s: file is %d bytes (%.1f MiB), exceeding the %d MiB safety cap; "+
+				"use grep/ls or a smaller max_lines instead", path, fi.Size(),
+				float64(fi.Size())/(1<<20), maxReadBytes>>20)
+		}
+	}
+
+	type readResult struct {
+		result interface{}
+		err    error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		res, e := readExecuteInner(args)
+		done <- readResult{res, e}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("read %s aborted: %v", path, ctx.Err())
+	case d := <-done:
+		return d.result, d.err
+	}
+}
+
+// readExecuteInner holds the original read implementation (arg parsing, line
+// slicing, header building). It is invoked under the context guard so it can
+// be aborted if the turn deadline or tool budget expires mid-read.
+func readExecuteInner(args map[string]interface{}) (interface{}, error) {
 	path, _ := args["file_path"].(string)
 	if path == "" {
 		path, _ = args["path"].(string)

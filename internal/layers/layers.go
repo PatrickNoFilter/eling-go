@@ -96,12 +96,22 @@ func (b *Brain) Query(ctx context.Context, q string, limit int) ([]Result, error
 		err     error
 	}
 
-	// Query each layer concurrently
+	// Query each layer concurrently. A panicking layer must still report
+	// back (as an error) so the collect loop below never deadlocks waiting
+	// for a result that will never arrive — and so a single broken layer
+	// can't crash the whole agent process.
 	ch := make(chan layerResult, len(b.layers))
 	for _, l := range b.layers {
 		go func(l Layer) {
+			name := "unknown"
+			defer func() {
+				if r := recover(); r != nil {
+					ch <- layerResult{layer: name, err: fmt.Errorf("layer %q panicked: %v", name, r)}
+				}
+			}()
+			name = l.Name()
 			res, err := l.Query(ctx, q, limit)
-			ch <- layerResult{layer: l.Name(), results: res, err: err}
+			ch <- layerResult{layer: name, results: res, err: err}
 		}(l)
 	}
 
