@@ -171,7 +171,7 @@ func recoverWithStack(ag *agent.Agent) {
 	}
 }
 
-const Version = "0.4.3"
+const Version = "0.4.4"
 
 func main() {
 	apiKey := flag.String("api-key", "", "DeepSeek API key (or set DEEPSEEK_API_KEY env var)")

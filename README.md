@@ -580,6 +580,8 @@ echo "$ctx" | grep -q '"tool_name":"edit"' && (cd /root/eling && go vet ./... >/
 
 ## 🔧 Provider Setup
 
+> **v0.4.4:** Stats persistence + learnings injection — `Agent.GetStats()` now carries runtime metrics (tool call counts, success rate, avg latency, per-provider spend) that are saved to `~/.eling/stats.json` on graceful shutdown and rendered by `./eling stats`; durable learnings from `~/.eling/learnings.md` are **injected into the system prompt at boot** (capped to the last 10), so lessons from past sessions carry forward automatically.
+
 > **v0.4.3:** Provider presets are now sourced from a single `internal/provider/catalog.go` — the setup wizard and CLI share one catalog (`Catalog.Find`, `DefaultProvider`, etc.), so adding a provider in one place updates every entry point, with tests guarding completeness/uniqueness.
 
 ### DeepSeek
