@@ -17,6 +17,7 @@ import (
 	"eling/internal/agent"
 	"eling/internal/cli"
 	"eling/internal/config"
+	"eling/internal/learnings"
 	"eling/internal/logger"
 	"eling/internal/markdownify"
 	"eling/internal/mcp/skill"
@@ -170,7 +171,7 @@ func recoverWithStack(ag *agent.Agent) {
 	}
 }
 
-const Version = "0.4.1"
+const Version = "0.4.2"
 
 func main() {
 	apiKey := flag.String("api-key", "", "DeepSeek API key (or set DEEPSEEK_API_KEY env var)")
@@ -207,7 +208,7 @@ func main() {
 			"remember": true, "recall": true, "probe": true, "reason": true,
 			"reflect": true, "snapshot": true, "list-snapshots": true,
 			"rollback": true, "link-stats": true, "linked-facts": true,
-			"evolve": true, "stats": true, "config": true, "init-rules": true,
+			"evolve": true, "stats": true, "learnings": true, "config": true, "init-rules": true,
 			"mcp": true, "continuum": true, "blackbox": true, "markdownify": true,
 			"sync": true, "setup": true, "install-opencode": true, "install-zero": true,
 			"install-termux": true, "help": true,
@@ -380,6 +381,12 @@ func main() {
 	ag, err := agent.New(cfg)
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	// A10: log the persistent learnings journal at boot so durable lessons
+	// from previous sessions are visible (and findable) in every session.
+	if n := learnings.Count(); n > 0 {
+		log.Printf("📓 %d learning(s) loaded from %s", n, learnings.Path())
 	}
 
 	// Phase 1: configure the bash sandbox from config (default on).

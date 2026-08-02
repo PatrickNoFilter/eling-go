@@ -158,6 +158,20 @@ type Agent struct {
 	autoTestMu    sync.Mutex
 	autoTestCache map[string]autoTestOutcome
 	autoTestLast  time.Time
+
+	// Provider call metrics (A5 stats dashboard, oh-my-pi steal A5): per
+	// provider calls/failures/latency recorded around every ChatStream
+	// attempt in chatStreamWithRetry. Read by GetStats.
+	providerStatsMu   sync.RWMutex
+	providerStats     map[string]*ProviderStat
+}
+
+// ProviderStat tracks per-provider call metrics for the stats dashboard (A5).
+type ProviderStat struct {
+	Calls        int64
+	Failures     int64
+	TotalLatency time.Duration
+	LastCallAt   time.Time
 }
 
 // autoTestOutcome records the result of a memoized autoTest run.
@@ -247,6 +261,7 @@ func New(cfg *config.Config) (*Agent, error) {
 		sessionName:     fmt.Sprintf("session_%d", time.Now().Unix()),
 		turnTimeoutHist: make([]TurnTimeoutRecord, 0),
 		autoTestCache:   make(map[string]autoTestOutcome),
+		providerStats:   make(map[string]*ProviderStat),
 	}
 
 	// Create a default session
@@ -1030,6 +1045,8 @@ func (a *Agent) chatStreamWithRetry(ctx context.Context, prov *provider.Provider
 			}
 
 			content, reasoning, toolCalls, err := currentProv.ChatStream(ctx, messages, onChunk, pToolDefs...)
+			// A5: per-provider call metrics for the stats dashboard.
+			a.recordProviderCall(provName, err, time.Now())
 			if err == nil {
 				return content, reasoning, toolCalls, nil
 			}
@@ -1665,6 +1682,50 @@ func (a *Agent) getProviderName(p *provider.Provider) string {
 	return "unknown"
 }
 
+// recordProviderCall records one ChatStream attempt against a provider (A5).
+// Thread-safe; called from chatStreamWithRetry around every attempt so the
+// stats dashboard can report per-provider calls, failures, success rate, and
+// average latency. The named return err is captured at the call site.
+func (a *Agent) recordProviderCall(name string, err error, start time.Time) {
+	a.providerStatsMu.Lock()
+	defer a.providerStatsMu.Unlock()
+	st := a.providerStats[name]
+	if st == nil {
+		st = &ProviderStat{}
+		a.providerStats[name] = st
+	}
+	st.Calls++
+	st.TotalLatency += time.Since(start)
+	st.LastCallAt = time.Now()
+	if err != nil {
+		st.Failures++
+	}
+}
+
+// providerStatsSnapshot returns a copy of the per-provider call metrics for
+// GetStats, computing success rate and average latency on the fly.
+func (a *Agent) providerStatsSnapshot() map[string]interface{} {
+	a.providerStatsMu.RLock()
+	defer a.providerStatsMu.RUnlock()
+	out := make(map[string]interface{}, len(a.providerStats))
+	for name, st := range a.providerStats {
+		rate := 1.0
+		avgMs := 0.0
+		if st.Calls > 0 {
+			rate = float64(st.Calls-st.Failures) / float64(st.Calls)
+			avgMs = float64(st.TotalLatency.Milliseconds()) / float64(st.Calls)
+		}
+		out[name] = map[string]interface{}{
+			"calls":          st.Calls,
+			"failures":       st.Failures,
+			"success_rate":   rate,
+			"avg_latency_ms": avgMs,
+			"last_call":      st.LastCallAt.Format(time.RFC3339),
+		}
+	}
+	return out
+}
+
 // recordTurnDuration stores a turn timeout record for future prediction.
 // isTurnTimeout reports whether err indicates the turn's wall-clock deadline
 // expired. This covers both the explicit "turn timed out after" error from
@@ -1794,7 +1855,7 @@ func (a *Agent) GetStats() map[string]interface{} {
 		}
 	}
 
-	return map[string]interface{}{
+	return mergeStats(map[string]interface{}{
 		"conversations":     entries,
 		"learned_skills":    len(a.skills),
 		"evolutions":        len(a.evolutions),
@@ -1806,7 +1867,18 @@ func (a *Agent) GetStats() map[string]interface{} {
 		"session":           a.sessionName,
 		"token_budget":      a.cfg.Agent.MaxContext,
 		"total_tokens_used": totalTokens,
+		// A5 stats dashboard (oh-my-pi steal): runtime tool + provider metrics.
+		"provider_calls": a.providerStatsSnapshot(),
+	}, a.ToolRegistry.Stats())
+}
+
+// mergeStats merges live registry metrics into the stats map without
+// overwriting non-metric keys (keeps GetStats readable and testable).
+func mergeStats(stats map[string]interface{}, reg map[string]interface{}) map[string]interface{} {
+	for k, v := range reg {
+		stats[k] = v
 	}
+	return stats
 }
 
 // ListTools returns all available tools from the registry.

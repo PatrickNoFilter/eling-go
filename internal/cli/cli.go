@@ -18,6 +18,7 @@ import (
 	"eling/internal/agent"
 	"eling/internal/config"
 	"eling/internal/layers"
+	"eling/internal/learnings"
 	"eling/internal/server"
 )
 
@@ -63,6 +64,8 @@ func RunCLI(cfg *config.Config, version string, args []string) bool {
 		return cmdForget(cfg, subArgs)
 	case "stats":
 		return cmdStats(cfg)
+	case "learnings":
+		return cmdLearnings(cfg, subArgs)
 	case "config":
 		return cmdConfig(cfg, subArgs)
 	case "setup":
@@ -815,6 +818,41 @@ func cmdStats(cfg *config.Config) bool {
 		}
 	}
 
+	return true
+}
+
+// ── Learnings Command (A10) ──────────────────────────────────────────────
+// `eling learnings` lists the persistent lesson journal at ~/.eling/learnings.md.
+// `eling learnings add "lesson"` appends a timestamped entry.
+
+func cmdLearnings(cfg *config.Config, args []string) bool {
+	if len(args) > 0 && args[0] == "add" {
+		if len(args) < 2 {
+			fmt.Println("Usage: eling learnings add \"lesson text\"")
+			return true
+		}
+		entry := strings.Join(args[1:], " ")
+		if err := learnings.Append(entry); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return true
+		}
+		fmt.Printf("📓 Learning recorded: %s\n", entry)
+		return true
+	}
+
+	ls, err := learnings.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading learnings: %v\n", err)
+		return true
+	}
+	if len(ls) == 0 {
+		fmt.Println("📓 No learnings yet. Add one with: eling learnings add \"lesson text\"")
+		return true
+	}
+	fmt.Printf("📓 Learnings (%d):\n", len(ls))
+	for i, l := range ls {
+		fmt.Printf("  %d. %s\n", i+1, l)
+	}
 	return true
 }
 
