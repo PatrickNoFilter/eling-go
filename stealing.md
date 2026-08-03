@@ -6,8 +6,8 @@
 > into ELING (Go, Termux-native).
 >
 > **Part I** (below) = Qwen Code heist (Phases 1–5, all ✅ DONE).
-> **Part II** (appended 2026-08-02) = oh-my-pi adoption list — **5 ✅ implemented (A1, A2, A5, A7, A10),
-> 4 ⏳ deferred (A3, A4, A6, A8), 1 v2 (A9)**. Re-audited 2026-08-02.
+> **Part II** (appended 2026-08-02) = oh-my-pi adoption list — **6 ✅ implemented (A1, A2, A5, A6, A7, A10),
+> 1 ⏳ deferred (A3)**. Re-audited 2026-08-02, A6 landed 2026-08-03.
 >
 > **Rule:** We *reimplement ideas*, never copy code. Apache-2.0 permits derivative work, but
 > ELING's Go architecture is different enough that clean-room reimplementation is the right call.
@@ -292,10 +292,12 @@ race conditions, free-tier rate limits). Revisit in v2.
 > badlogic/pi-mono). 6,055 files; ~55k LOC Rust core (`crates/`) + TypeScript packages
 > (`packages/`); Bun runtime; Bazel build. Clone on-device at `/root/oh-my-pi` (depth-1, 163 MB).
 >
-> **What omp does better than us:** tool-call *reliability* (hash-anchored edits, benchmark-tuned
-> prompts per model), IDE-grade code intelligence (14 LSP ops, 28 DAP ops), persistent execution
-> kernels that loop back into the agent's own tools, a 40+ provider model catalog, and a
-> docs-per-subsystem map (~90 docs) that makes a 55k-LOC codebase navigable.
+> **What omp does better than us:** tool-call *reliability* (hash-anchored edits), IDE-grade code
+> intelligence (14 LSP ops — we adopted rename, A6), persistent execution shells (A3), a 40+
+> provider model catalog, and a docs-per-subsystem map (~90 docs) that makes a 55k-LOC codebase
+> navigable. Kernels→tool loopback, DAP, and benchmark-gated prompts were **audited and dropped**
+> (2026-08-03): loopback = risky nested execution; DAP = heavy, weak Termux UX; benchmark gate =
+> slower builds + API cost on free tier.
 >
 > **Rule:** same as Part I — reimplement ideas, never copy code. ELING is Go single-binary by
 > design; omp's Rust natives (search/grep/shell) are **already equivalent** in ELING via ugrep 7.5.0.
@@ -307,13 +309,10 @@ race conditions, free-tier rate limits). Revisit in v2.
 | A1 | **Hash-anchored edits** (`hashline`-style) | ✅ | S | 🔥🔥🔥 | `internal/tools/files.go` (hash anchor + occurrence) |
 | A2 | **Model catalog** (40+ providers, per-model tuning) | ✅ | S–M | 🔥🔥🔥 | `internal/provider/catalog.go` (single source, v0.4.3) |
 | A3 | **Persistent shell session** (`pi-shell`-style) | ⏳ | M | 🔥🔥 | `internal/tools/bash.go` + `sandbox.go` |
-| A4 | **Kernel→tool loopback** (Python/Bun kernel calls agent tools) | ⏳ | M | 🔥🔥 | `internal/server/` (eling serve daemon, Phase 4) |
-| A5 | **`eling stats` dashboard** (`omp stats`-style) | ✅ | S | 🔥🔥 | `Registry.Stats()` + `GetStats` + `eling stats` CLI (persisted snapshot) |
-| A6 | **LSP rename wiring** (`willRenameFiles` / `applyEdit`) | ⏳ | S–M | 🔥🔥 | `internal/lsp/lsp.go` (gopls already wired) |
+| A5 | **`eling stats` dashboard** (`omp stats`-style) | ✅ | S | 🔥🔥 | `Registry.Stats()` + `GetStats` + `eling stats` CLI (persisted snapshot) — **v0.4.4** |
+| A6 | **LSP rename wiring** (`willRenameFiles` / `applyEdit`) | ✅ | S–M | 🔥🔥 | `internal/lsp/lsp.go` + `internal/tools/lsp_rename.go` (lsp_rename tool, 2026-08-03) |
 | A7 | **Docs-per-subsystem** (1 doc per `internal/` package) | ✅ | S (docs) | 🔥🔥 | `docs/` — 9 subsystem docs + README index |
-| A8 | **Benchmark gate for prompt/tool changes** (`metaharness`-style) | ⏳ | S–M | 🔥 | `internal/benchmark/` (already exists) |
-| A9 | DAP integration (28 debug ops) | ⏳ | L | 🔥 | reuse LSP JSON-RPC transport — **v2** |
-| A10 | Mnemosyne-style learnings file read at session start | ✅ | S | 🔥 | `internal/learnings/` (journal ✓, system-prompt injection at boot ✓) |
+| A10 | Mnemosyne-style learnings file read at session start | ✅ | S | 🔥 | `internal/learnings/` (journal ✓, system-prompt injection at boot ✓) — **v0.4.4** |
 
 ---
 
@@ -403,31 +402,11 @@ workflows re-state context each time.
 
 ---
 
-### A4 — Kernel→tool loopback (Python/Bun kernels call agent tools)  `[candidate]`
-
-**What omp does:** persistent Python/Bun kernels can call back into the agent's own tools
-(read/search/edit) over a loopback HTTP channel — code can inspect and modify the repo itself.
-
-**Why we want it:** ELING's `eling serve` daemon (`internal/server/`, Phase 4 ACP mode) already
-exposes HTTP+SSE — the loopback substrate exists for free.
-
-**Plan:**
-1. Add `python`/`node` execution tool that starts a persistent kernel per session
-   (`internal/tools/kernel.go`) and exposes `ELING_TOOL_LOOPBACK=http://127.0.0.1:<port>` env.
-2. Kernel code can `requests.post(loopback + "/tool", json={name, args})` to call registered
-   tools (read/edit/grep) with the same auth the daemon uses.
-3. Guard: loopback bound to 127.0.0.1 only; tools whitelist (no bash-in-bash by default).
-
-**Files:** `internal/tools/kernel.go` (new), `internal/server/`, `internal/tools/registry.go`.
-**Risk:** nested execution → phase-gate behind config flag, v2 default off.
-
----
-
-### A5 — `eling stats` dashboard (omp stats-style)  `[IMPLEMENTED 2026-08-02]`
+### A5 — `eling stats` dashboard (omp stats-style)  `[IMPLEMENTED 2026-08-02 v0.4.4]`
 
 **What omp does:** `omp stats` shows tokens, sessions, tool-call success rates, per-model spend.
 
-**What shipped (amendment #5 — commits `c93e57d`/v0.4.2 first half, this commit second half):**
+**What shipped (amendment #5 — commits `c93e57d`/v0.4.2 first half, `a1ae10f`/v0.4.4 second half):**
 1. **`Registry.Stats()`** (`internal/tools/registry.go:165`) — tool_calls, tool_failures,
    tool_success_rate, tool_avg_latency_ms + per-tool breakdown.
 2. **`Agent.GetStats`** (`internal/agent/agent.go`) — merges registry stats with
@@ -448,7 +427,7 @@ Per amendment #5: no new `internal/stats/` package, no new subcommand — `cmdSt
 
 ---
 
-### A6 — LSP rename wiring (willRenameFiles / applyEdit)  `[candidate]`
+### A6 — LSP rename wiring (willRenameFiles / applyEdit)  `[IMPLEMENTED 2026-08-03]`
 
 **What omp does:** 14 LSP ops incl. safe rename (`willRenameFiles` → `workspace/applyEdit`).
 
@@ -456,11 +435,21 @@ Per amendment #5: no new `internal/stats/` package, no new subcommand — `cmdSt
 (`internal/lsp/lsp.go`); rename is the natural next step and makes refactors land cleanly
 instead of string-swapping.
 
-**Plan:** add `textDocument/rename` + `workspace/applyEdit` + `willRenameFiles` handling to
-`internal/lsp/lsp.go`, exposed as an `lsp_rename` tool. Reuse existing gopls transport
-(JSON-RPC stdio). Tests exist (`real_gopls_test.go`).
+**What shipped:**
+1. **`internal/lsp/lsp.go`** — `textDocument/rename` request (`Server.rename`, `Manager.Rename`,
+   package-level `Rename`), server-initiated `workspace/applyEdit` handling (`handleApplyEdit`,
+   `parseApplyEdit`, `respond` — the read loop now acks server requests so the server never
+   blocks), `TextEdit` type, `SetApplyEditHandler` hook.
+2. **`internal/tools/lsp_rename.go`** — registers the `lsp_rename` tool (file_path + 0-based
+   line/col + new_name), opens the file via `Diagnostics` first (gopls refuses rename on unseen
+   documents), then applies edits through the **same safety net as edit/write**: per-file
+   `lockFile` + `backupFile` + `isTextFile` binary guard + reverse-document-order application
+   with UTF-16 column mapping (`lspOffset`) so non-ASCII files stay correct.
+3. **Server-pushed applyEdit routing** — `SetApplyEditHandler` installed at tools init so
+   workspace/applyEdit pushes (rename code actions, refactors) land through backup+lock too.
 
-**Files:** `internal/lsp/lsp.go`, `internal/tools/registry.go`, tests.
+**Files:** `internal/lsp/lsp.go`, `internal/lsp/lsp_test.go`, `internal/tools/lsp_rename.go`,
+`internal/tools/lsp_rename_test.go`.
 
 ---
 
@@ -473,41 +462,17 @@ source and the monorepo stays navigable at 55k LOC.
 `docs/agent.md`, `docs/tools.md`, `docs/skills.md`, `docs/provider.md`, `docs/mcp.md`,
 `docs/tui.md`, `docs/lsp.md`, `docs/session.md`, `docs/server.md` (each: purpose, entry
 points, key types, invariants — e.g. "every tool call has a timeout") plus `docs/README.md`
-as the index. `docs/benchmark.md` deferred until A8 lands (no benchmark CLI yet).
+as the index. `docs/benchmark.md` deferred (no benchmark CLI yet).
 
 **Files:** `docs/*.md` (9 subsystem docs + README index), `README.md` (links to `docs/`).
 
 ---
 
-### A8 — Benchmark gate for prompt/tool changes (metaharness-style)  `[candidate]`
-
-**What omp does:** a metaharness benchmarks prompt variants per model; prompts are tuned against
-real task suites before shipping.
-
-**Plan:** `internal/benchmark/` already exists (cases, executor, metrics, report) — add a
-`baselines.json` + make `./rebuild.sh` (or `eling bench`) compare against it when
-prompt/tool-schema files change; fail the build on >X% regression. Mirrors the discipline that
-kept omp's edit success at +5pp.
-
-**Files:** `internal/benchmark/`, `rebuild.sh`.
-
----
-
-### A9 — DAP integration (28 debug ops)  `[v2 candidate]`
-
-**What omp does:** full Debug Adapter Protocol — breakpoints, stepping, watches.
-
-**Why v2:** heavier than LSP (needs a debug server per language), and Termux debugging UX is
-limited. The transport (JSON-RPC over stdio) is identical to LSP, so A6 should land first and
-DAP can reuse the same plumbing.
-
----
-
-### A10 — Mnemosyne-style learnings file  `[IMPLEMENTED 2026-08-02]`
+### A10 — Mnemosyne-style learnings file  `[IMPLEMENTED 2026-08-02 v0.4.4]`
 
 **What omp does:** an explicit memory backend the agent reads at session start.
 
-**What shipped (commits `c93e57d`/v0.4.2 + this commit):**
+**What shipped (commits `c93e57d`/v0.4.2 + `a1ae10f`/v0.4.4):**
 1. **`internal/learnings/learnings.go`** (Load / Append / Count / Path, atomic write + rotation
    per amendment) + `internal/learnings/learnings_test.go`.
 2. **`eling learnings` CLI** (`cmdLearnings`, `cli.go`: list + `add "lesson"`).
@@ -534,9 +499,9 @@ DAP can reuse the same plumbing.
 
 ## 🧪 Testing & Safety (same rules as Part I)
 
-1. `./rebuild.sh` mandatory before commit; `go test -race ./...` for A3/A4 (concurrency).
+1. `./rebuild.sh` mandatory before commit; `go test -race ./...` for A3 (concurrency).
 2. `create_backup` before each phase.
-3. A1–A2 are quick wins (S) → land first. A3–A4 behind config flags, default off.
+3. A1–A2 are quick wins (S) → land first. A3 behind config flag, default off.
 4. Update `docs/` (A7) in the same commit as any phase.
 5. Bump version via `go-version-bump` on milestones.
 
@@ -552,16 +517,14 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
 | A1 | 🟡 `editExecute` is read-modify-write with **no lock** (`files.go:289`) | 🟢 no `applyPatch`/hash func exists | 🟢 **real win**: `strings.Replace(...,1)` replaces *first occurrence* — ambiguous when old_str repeats; hash anchoring fixes it | 🟡 amend (see below) |
 | A2 | 🟢 static table | 🔴 **`setupPresets()` already exists** (`cli/setup.go:341`, 6 providers) + wizard `catalogEntry` | 🟡 two catalogs = drift (grep-wrapper déjà vu) | 🔴 reframe as **extraction**, not new file |
 | A3 | 🔴 **`cleanupSandbox()` prunes `run-*` dirs by mtime** — can delete an active session shell's cwd; no per-shell serialization → concurrent cmds interleave on one PTY; `destructiveCommand` guard bypassed per-cmd; `scrubEnv` changes shell env | 🟢 no `shell.go` | 🟡 bash -ic + PTY prompt-boundary parsing is hard; env differs from fresh exec | 🔴 needs 3 fixes below |
-| A4 | 🟡 kernel orphans on `Server.Shutdown` (only HTTP stopped, `server.go:102`); port TOCTOU if picked manually | 🟢 no `kernel.go`; no `/tool` route | 🟢 `Registry.Execute` is RWMutex-guarded — loopback is feasible | 🟡 amend (see below) |
 | A5 | 🟢 brain/session reads are safe | 🔴 **`eling stats` EXISTS** (`cli.go:64` → `cmdStats` brain stats) + `/stats` TUI (`main.go:664` → `GetStats` returns tokens/tools/sessions) | 🔴 new `internal/stats/` + new command = shadow conflict | 🔴 reframe as **extend cmdStats/GetStats** |
 | A6 | 🟢 `writeMu` (lsp.go:98) + `mu` already serialize stdin & seq | 🟢 no `Rename` func | 🟢 gopls transport + `real_gopls_test.go` ready | 🟢 but apply edits via `backupFile`/`editExecute`, not raw `applyEdit` |
-| A8 | 🟢 build-time only | 🟢 no `bench` subcommand; no baselines.json | 🟡 gate in `rebuild.sh` = **slower builds** (user already flagged build time) + needs API key | 🟡 opt-in `--bench` flag, never default |
 | A10 | 🟢 boot-time read; separate file | 🟢 `memory.go` has Remember/Recall only | 🟢 | 🟢 use atomic write + rotation |
 
-**Post-audit status (2026-08-02):** A2 ✅ (v0.4.3, single-source catalog), A5 ✅ (Registry.Stats +
-GetStats + `eling stats` CLI with persisted snapshot), A7 ✅ (v0.4.2, 9 docs), A10 ✅ (journal +
-CLI + system-prompt injection per turn via buildMessages + Learn()). A1 already ✅ above.
-A3/A4/A6/A8 still ⏳, A9 v2.
+**Post-audit status (2026-08-02, updated for v0.4.4):** A2 ✅ (v0.4.3, single-source catalog), A5 ✅
+(v0.4.4, Registry.Stats + GetStats + `eling stats` CLI with persisted snapshot), A7 ✅ (v0.4.2, 9 docs),
+A10 ✅ (v0.4.4, journal + CLI + system-prompt injection per turn via buildMessages + Learn()). A1
+already ✅ above. **A6 ✅ (2026-08-03, lsp_rename tool + applyEdit safety net).** A3 still ⏳.
 
 ## 🔧 Amendments locked in (must be applied when implementing)
 
@@ -572,19 +535,18 @@ A3/A4/A6/A8 still ⏳, A9 v2.
 3. **A3** — (a) per-shell mutex serializes every command; (b) persistent shells register their
    sandbox dir with `cleanupSandbox` exclusion list; (c) re-run `destructiveCommand` per command
    inside the shell; (d) keep `shell.persistent` default **off**.
-4. **A4** — (a) kill kernels in `Server.Shutdown`; (b) port via `net.Listen("127.0.0.1:0")` +
-   pass actual port (no TOCTOU); (c) auth token as header, never in child env.
-5. **A5** — extend `cmdStats` (`cli.go`) + `Agent.GetStats` (`agent.go`) with tool-success %,
+4. **A5** — extend `cmdStats` (`cli.go`) + `Agent.GetStats` (`agent.go`) with tool-success %,
    latency, per-provider spend. No new `internal/stats/`, no new subcommand. ✅ Applied 2026-08-02.
-6. **A8** — `eling bench --gate <baselines.json>` opt-in; `rebuild.sh` untouched.
-7. **A6** — `lsp_rename` result goes through `backupFile()` + `editExecute` so backups/rotation
-   are preserved.
+5. **A6** — `lsp_rename` edits go through `lockFile()` + `backupFile()` + `isTextFile()` (the same
+   primitives `editExecute` uses), NOT raw `applyEdit` writes. ✅ Applied 2026-08-03. *(Deviation
+   from draft wording: edits are positional LSP ranges, so they bypass `editExecute`'s
+   string-occurrence API — but the backup/lock/binary-guard safety net is identical.)*
 
 ## 📚 Reference (Part II)
 
 - oh-my-pi repo: https://github.com/can1357/oh-my-pi — local clone: `/root/oh-my-pi`
 - Key omp subsystems to study before implementing:
   - `packages/hashline` (A1), `packages/model-catalog` (A2), `crates/pi-shell` (A3),
-    `packages/metaharness` (A8), `packages/mnemopi` + `docs/mnemosyne-memory-backend.md` (A10),
+    `packages/mnemopi` + `docs/mnemosyne-memory-backend.md` (A10),
     `packages/natives` + `crates/pi-natives` (perf core — read for ideas only)
 - omp docs map: `docs/` in `/root/oh-my-pi` (~90 files, 1:1 per subsystem)

@@ -6,13 +6,16 @@ package tools
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -47,6 +50,21 @@ var (
 	embedCache     = make(map[string]EmbeddingVector)     // content -> vector
 	embedCacheKeys = make([]string, 0, maxEmbedCacheSize) // insertion order for eviction
 	embedCacheMu   sync.RWMutex
+
+	// embedProbeMu serializes the embedding endpoint capability probe so
+	// concurrent turns don't hammer a broken /embeddings endpoint in parallel.
+	embedProbeMu sync.Mutex
+
+	// embedEndpointDead is 1 once we've confirmed the provider's /embeddings
+	// route is missing (or every model we tried was rejected definitively).
+	// While set, getEmbedding skips the network entirely and falls back to the
+	// local embedding — eliminating the multi-second probe chain on every turn.
+	embedEndpointDead int32
+
+	// embedDeadModels records embedding models that returned a definitive
+	// client error (404 model not found, 400 bad request, ...) so they are
+	// never attempted again in this process.
+	embedDeadModels sync.Map // string -> struct{}
 )
 
 // EmbeddingRequest is sent to the /embeddings API.
@@ -119,6 +137,11 @@ func localEmbedding(text string) EmbeddingVector {
 // It first tries the configured API provider; if that fails, it falls back
 // to a local embedding (character trigram hash) that works offline.
 // Results are cached locally to avoid redundant computation.
+//
+// API probing is guarded so providers without an /embeddings endpoint (a
+// common case for chat-only gateways) are detected once and skipped for the
+// rest of the process. A broken endpoint used to stall every turn while the
+// agent probed up to 8 models sequentially.
 func getEmbedding(text string) (EmbeddingVector, error) {
 	if text == "" {
 		return nil, fmt.Errorf("empty text")
@@ -135,7 +158,48 @@ func getEmbedding(text string) (EmbeddingVector, error) {
 	}
 	embedCacheMu.RUnlock()
 
-	// Try API-based embedding first
+	// If we've already confirmed this provider has no usable /embeddings
+	// endpoint, skip the network entirely — it only added seconds of latency.
+	if atomic.LoadInt32(&embedEndpointDead) == 0 {
+		if vec, err := getEmbeddingFromAPI(normalized); err == nil {
+			return vec, nil
+		}
+	}
+
+	// API embedding failed or is unavailable — fall back to local embedding.
+	// This works offline and doesn't require any external API.
+	vec := localEmbedding(normalized)
+	cacheEmbedding(normalized, vec)
+	return vec, nil
+}
+
+// cacheEmbedding stores a computed embedding with FIFO eviction.
+func cacheEmbedding(text string, vec EmbeddingVector) {
+	embedCacheMu.Lock()
+	defer embedCacheMu.Unlock()
+	embedCache[text] = vec
+	embedCacheKeys = append(embedCacheKeys, text)
+	if len(embedCacheKeys) > maxEmbedCacheSize {
+		evict := embedCacheKeys[0]
+		embedCacheKeys = embedCacheKeys[1:]
+		delete(embedCache, evict)
+	}
+}
+
+// getEmbeddingFromAPI attempts an API-based embedding, bounded by a per-call
+// probe budget and guided by negative caches (dead models, dead endpoint).
+// It returns the vector on success, or a non-nil error when the API is
+// unavailable so callers can degrade to the local embedding.
+func getEmbeddingFromAPI(text string) (EmbeddingVector, error) {
+	embedProbeMu.Lock()
+	defer embedProbeMu.Unlock()
+
+	// Re-check under the probe lock: another goroutine may have confirmed the
+	// endpoint is dead while we were waiting.
+	if atomic.LoadInt32(&embedEndpointDead) != 0 {
+		return nil, fmt.Errorf("embedding endpoint unavailable")
+	}
+
 	apiKey := os.Getenv("ELING_API_KEY")
 	baseURL := os.Getenv("ELING_BASE_URL")
 	model := os.Getenv("ELING_EMBEDDING_MODEL")
@@ -151,7 +215,7 @@ func getEmbedding(text string) (EmbeddingVector, error) {
 	}
 
 	// Build list of models to try: configured model first, then fallbacks
-	modelsToTry := make([]string, 0)
+	modelsToTry := make([]string, 0, 8)
 	if model != "" {
 		modelsToTry = append(modelsToTry, model)
 	}
@@ -171,43 +235,120 @@ func getEmbedding(text string) (EmbeddingVector, error) {
 		}
 	}
 
+	// Bound how long a single turn may spend probing a broken endpoint.
+	deadline := time.Now().Add(embeddingProbeBudget())
+	attempted := 0
 	for _, tryModel := range modelsToTry {
-		vec, err := callEmbeddingAPI(apiKey, baseURL, tryModel, normalized)
+		if _, dead := embedDeadModels.Load(tryModel); dead {
+			continue
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		attempted++
+		vec, err := callEmbeddingAPI(apiKey, baseURL, tryModel, text, remaining)
 		if err == nil {
-			// Cache the result (with LRU eviction when over cap)
-			embedCacheMu.Lock()
-			embedCache[normalized] = vec
-			embedCacheKeys = append(embedCacheKeys, normalized)
-			if len(embedCacheKeys) > maxEmbedCacheSize {
-				evict := embedCacheKeys[0]
-				embedCacheKeys = embedCacheKeys[1:]
-				delete(embedCache, evict)
-			}
-			embedCacheMu.Unlock()
+			cacheEmbedding(text, vec)
 			return vec, nil
+		}
+		if embeddingRouteMissing(err) {
+			// The /embeddings route itself doesn't exist (e.g. an HTML 404
+			// from a chat-only gateway). No model will ever succeed here —
+			// remember it for the rest of this process.
+			atomic.StoreInt32(&embedEndpointDead, 1)
+			return nil, err
+		}
+		if definitiveEmbeddingFailure(err) {
+			// The provider definitively rejected this model (not found, bad
+			// request, ...). Never try it again, but keep looking for one
+			// that works.
+			embedDeadModels.Store(tryModel, struct{}{})
+		}
+		// Transient failures (5xx, 429, network blips) fall through to the
+		// next model within the budget.
+	}
+
+	// If every live model was rejected definitively, the endpoint is dead for
+	// us — stop probing on future turns too.
+	if attempted > 0 {
+		remainingLive := 0
+		for _, tryModel := range modelsToTry {
+			if _, dead := embedDeadModels.Load(tryModel); !dead {
+				remainingLive++
+			}
+		}
+		if remainingLive == 0 {
+			atomic.StoreInt32(&embedEndpointDead, 1)
 		}
 	}
 
-	// API embedding failed for all models — fall back to local embedding
-	// This works offline and doesn't require any external API.
-	vec := localEmbedding(normalized)
+	return nil, fmt.Errorf("embedding API unavailable after probing %d model(s)", attempted)
+}
 
-	// Cache and return the local embedding
-	embedCacheMu.Lock()
-	embedCache[normalized] = vec
-	embedCacheKeys = append(embedCacheKeys, normalized)
-	if len(embedCacheKeys) > maxEmbedCacheSize {
-		evict := embedCacheKeys[0]
-		embedCacheKeys = embedCacheKeys[1:]
-		delete(embedCache, evict)
+// embeddingProbeBudget returns how long a single turn may spend probing the
+// embedding API before falling back to the local embedding. Tunable via
+// ELING_EMBED_PROBE_BUDGET_MS (default 2000ms).
+func embeddingProbeBudget() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("ELING_EMBED_PROBE_BUDGET_MS"))
+	if raw == "" {
+		return 2 * time.Second
 	}
-	embedCacheMu.Unlock()
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 2 * time.Second
+	}
+	return time.Duration(n) * time.Millisecond
+}
 
-	return vec, nil
+// embeddingAPIError carries the HTTP status and content type of a failed
+// embeddings call so the caller can classify the failure as definitive
+// (endpoint or model unusable) or transient (retryable blip).
+type embeddingAPIError struct {
+	statusCode  int
+	contentType string
+	err         error
+}
+
+func (e *embeddingAPIError) Error() string { return e.err.Error() }
+
+func (e *embeddingAPIError) Unwrap() error { return e.err }
+
+// definitiveEmbeddingFailure reports whether an embedding API error means the
+// endpoint or model is unusable — retrying or trying other models won't help.
+// 4xx (except 408 and 429) and 501 are treated as definitive.
+func definitiveEmbeddingFailure(err error) bool {
+	var apiErr *embeddingAPIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	sc := apiErr.statusCode
+	if sc >= 400 && sc <= 499 && sc != http.StatusRequestTimeout && sc != http.StatusTooManyRequests {
+		return true
+	}
+	return sc == http.StatusNotImplemented // 501
+}
+
+// embeddingRouteMissing reports whether the failure means the /embeddings
+// route does not exist at all (e.g. an HTML 404/405/501 page from a gateway),
+// independent of the model name. When true, no model will ever succeed on
+// this base URL.
+func embeddingRouteMissing(err error) bool {
+	var apiErr *embeddingAPIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.statusCode {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		// An API responding in JSON is a model-level error (e.g. OpenAI's
+		// "model not found"). A non-JSON body means the route itself is gone.
+		return !strings.Contains(strings.ToLower(apiErr.contentType), "json")
+	}
+	return false
 }
 
 // callEmbeddingAPI calls the embedding API for a single model and returns the vector.
-func callEmbeddingAPI(apiKey, baseURL, model, text string) (EmbeddingVector, error) {
+func callEmbeddingAPI(apiKey, baseURL, model, text string, timeout time.Duration) (EmbeddingVector, error) {
 	// Build the request
 	reqBody := EmbeddingRequest{
 		Model: model,
@@ -228,7 +369,12 @@ func callEmbeddingAPI(apiKey, baseURL, model, text string) (EmbeddingVector, err
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	// The probe budget is the per-model deadline; never exceed the previous
+	// 15s hard cap so a single hanging probe can't stall a turn forever.
+	if timeout <= 0 || timeout > 15*time.Second {
+		timeout = 15 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("embedding request failed: %w", err)
@@ -237,7 +383,11 @@ func callEmbeddingAPI(apiKey, baseURL, model, text string) (EmbeddingVector, err
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("embedding API error %d for model %q: %s", resp.StatusCode, model, string(respBody))
+		return nil, &embeddingAPIError{
+			statusCode:  resp.StatusCode,
+			contentType: resp.Header.Get("Content-Type"),
+			err:         fmt.Errorf("embedding API error %d for model %q: %s", resp.StatusCode, model, string(respBody)),
+		}
 	}
 
 	var embResp EmbeddingResponse
@@ -375,6 +525,17 @@ func SetEmbeddingEnv(apiKey, baseURL, model string) {
 // semantic index.  If queryEmbed is nil it will be computed from queryText.
 // Returns up to topK results sorted by descending similarity score.
 func semanticSearch(queryText string, queryEmbed EmbeddingVector, topK int) ([]SemanticResult, error) {
+	// Copy the index first and bail out early when it's empty. Computing an
+	// embedding just to find nothing is pure waste on every turn — and for a
+	// broken /embeddings endpoint it used to add seconds of latency.
+	semanticIndexMu.RLock()
+	items := make([]SemanticIndexItem, len(semanticIndex))
+	copy(items, semanticIndex)
+	semanticIndexMu.RUnlock()
+	if len(items) == 0 {
+		return nil, nil
+	}
+
 	// Compute embedding for the query if not provided
 	var err error
 	if queryEmbed == nil {
@@ -383,11 +544,6 @@ func semanticSearch(queryText string, queryEmbed EmbeddingVector, topK int) ([]S
 			return nil, fmt.Errorf("embed query: %w", err)
 		}
 	}
-
-	semanticIndexMu.RLock()
-	items := make([]SemanticIndexItem, len(semanticIndex))
-	copy(items, semanticIndex)
-	semanticIndexMu.RUnlock()
 
 	type scored struct {
 		item  SemanticIndexItem

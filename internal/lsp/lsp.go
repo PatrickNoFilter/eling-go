@@ -51,6 +51,28 @@ func (d Diagnostic) SeverityText() string {
 	}
 }
 
+// TextEdit is a single file edit produced by a rename (A6). Positions are
+// 0-based LSP positions (line + UTF-16 code-unit column).
+type TextEdit struct {
+	Path    string // absolute file path
+	Line    int    // 0-based start line
+	Col     int    // 0-based start column
+	EndLine int    // 0-based end line
+	EndCol  int    // 0-based end column
+	NewText string
+}
+
+// applyEditHook receives workspace/applyEdit edits from any live server. The
+// tools layer installs it (lsp.SetApplyEditHandler) so renames are applied
+// through the same backup+lock path as edit/write.
+var applyEditHook func([]TextEdit) error
+
+// SetApplyEditHandler installs the handler invoked when a server pushes
+// workspace/applyEdit. Called by the tools package at init (A6).
+func SetApplyEditHandler(h func([]TextEdit) error) {
+	applyEditHook = h
+}
+
 // Config controls the LSP integration.
 type Config struct {
 	Enabled bool
@@ -122,6 +144,20 @@ func (s *Server) readLoop() {
 			Params json.RawMessage `json:"params"`
 		}
 		if err := json.Unmarshal(msg, &base); err != nil {
+			continue
+		}
+
+		if base.Method != "" && base.ID != nil {
+			// Server-initiated REQUEST (e.g. workspace/applyEdit): a message
+			// with both a method and an id is a request the client must
+			// answer — NOT a response to one of our requests. (Before A6 the
+			// read loop only saw notifications here; rename added requests.)
+			switch base.Method {
+			case "workspace/applyEdit":
+				s.handleApplyEdit(base.ID, base.Params)
+			default:
+				s.respond(base.ID, struct{}{}) // ack unknown requests so the server never blocks
+			}
 			continue
 		}
 
@@ -262,6 +298,65 @@ func (s *Server) handleDiagnostics(params json.RawMessage) {
 	s.mu.Unlock()
 }
 
+// respond sends a JSON-RPC response to a server-initiated request (e.g.
+// workspace/applyEdit). Without an answer the server blocks forever waiting
+// for our ack — rename requests would hang. Writes are serialized with send
+// via writeMu.
+func (s *Server) respond(id json.RawMessage, result interface{}) {
+	if len(id) == 0 {
+		return
+	}
+	payload, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      json.RawMessage(id),
+		"result":  result,
+	})
+	if err != nil {
+		return
+	}
+	s.writeMu.Lock()
+	_, _ = fmt.Fprintf(s.in, "Content-Length: %d\r\n\r\n", len(payload))
+	_, _ = s.in.Write(payload)
+	s.writeMu.Unlock()
+}
+
+// handleApplyEdit converts a server-initiated workspace/applyEdit request
+// into TextEdits and forwards them to the tools-layer hook (installed via
+// SetApplyEditHandler) so they land through the same backup + per-file-lock
+// path as edit/write. Always answers the request so the server never blocks.
+func (s *Server) handleApplyEdit(id json.RawMessage, params json.RawMessage) {
+	edits, err := parseApplyEdit(params)
+	if err != nil {
+		s.respond(id, map[string]interface{}{"applied": false, "failureReason": err.Error()})
+		return
+	}
+	if applyEditHook == nil {
+		s.respond(id, map[string]interface{}{"applied": false, "failureReason": "no apply-edit handler installed"})
+		return
+	}
+	if err := applyEditHook(edits); err != nil {
+		s.respond(id, map[string]interface{}{"applied": false, "failureReason": err.Error()})
+		return
+	}
+	s.respond(id, map[string]interface{}{"applied": true})
+}
+
+// parseApplyEdit extracts the edit payload from workspace/applyEdit params
+// into []TextEdit. Handles both `edit.changes` (legacy) and
+// `edit.documentChanges` (modern) — gopls ≥0.23 pushes the latter.
+func parseApplyEdit(params json.RawMessage) ([]TextEdit, error) {
+	var p struct {
+		Edit json.RawMessage `json:"edit"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("bad workspace/applyEdit params: %w", err)
+	}
+	if len(p.Edit) == 0 {
+		return nil, fmt.Errorf("bad workspace/applyEdit params: missing edit")
+	}
+	return parseWorkspaceEdits(p.Edit)
+}
+
 // didOpenOrChange sends didOpen on first sight of a file, didChange afterwards
 // (full-text sync, version 1+).
 func (s *Server) didOpenOrChange(path, content string) {
@@ -301,6 +396,127 @@ func (s *Server) getDiagnostics(path string) []Diagnostic {
 	return out
 }
 
+// rename performs the textDocument/rename request and flattens the result's
+// per-URI edits into TextEdits. Handles both legacy `changes` (map URI →
+// edits) and modern `documentChanges` (list of textDocument + edits) forms —
+// gopls ≥0.23 replies with documentChanges by default.
+func (s *Server) rename(path string, line, col int, newName string) ([]TextEdit, error) {
+	uri := pathToURI(path)
+	res, err := s.send("textDocument/rename", map[string]interface{}{
+		"textDocument": map[string]interface{}{"uri": uri},
+		"position":     map[string]interface{}{"line": line, "character": col},
+		"newName":      newName,
+	}, true)
+	if err != nil {
+		return nil, err
+	}
+	return parseWorkspaceEdits(res)
+}
+
+// parseWorkspaceEdits converts either a rename result or applyEdit edit
+// payload into []TextEdit. Both share the same shape:
+//
+//	changes: {uri: [{range, newText}]}              // legacy form
+//	documentChanges: [{textDocument:{uri}, edits:[{range,newText}]}]  // modern form
+func parseWorkspaceEdits(res json.RawMessage) ([]TextEdit, error) {
+	var legacy struct {
+		Changes map[string][]struct {
+			Range struct {
+				Start struct {
+					Line      int `json:"line"`
+					Character int `json:"character"`
+				} `json:"start"`
+				End struct {
+					Line      int `json:"line"`
+					Character int `json:"character"`
+				} `json:"end"`
+			} `json:"range"`
+			NewText string `json:"newText"`
+		} `json:"changes"`
+	}
+	if err := json.Unmarshal(res, &legacy); err != nil {
+		return nil, fmt.Errorf("parse workspace edits: %w", err)
+	}
+	if len(legacy.Changes) > 0 {
+		return flattenChanges(legacy.Changes), nil
+	}
+	var modern struct {
+		DocumentChanges []struct {
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+			Edits []struct {
+				Range struct {
+					Start struct {
+						Line      int `json:"line"`
+						Character int `json:"character"`
+					} `json:"start"`
+					End struct {
+						Line      int `json:"line"`
+						Character int `json:"character"`
+					} `json:"end"`
+				} `json:"range"`
+				NewText string `json:"newText"`
+			} `json:"edits"`
+		} `json:"documentChanges"`
+	}
+	if err := json.Unmarshal(res, &modern); err != nil {
+		return nil, fmt.Errorf("parse documentChanges: %w", err)
+	}
+	var edits []TextEdit
+	for _, dc := range modern.DocumentChanges {
+		p := uriToPath(dc.TextDocument.URI)
+		if p == "" {
+			continue
+		}
+		for _, e := range dc.Edits {
+			edits = append(edits, TextEdit{
+				Path:    p,
+				Line:    e.Range.Start.Line,
+				Col:     e.Range.Start.Character,
+				EndLine: e.Range.End.Line,
+				EndCol:  e.Range.End.Character,
+				NewText: e.NewText,
+			})
+		}
+	}
+	return edits, nil
+}
+
+// flattenChanges converts a legacy {uri: [edits]} map into []TextEdit.
+func flattenChanges(changes map[string][]struct {
+	Range struct {
+		Start struct {
+			Line      int `json:"line"`
+			Character int `json:"character"`
+		} `json:"start"`
+		End struct {
+			Line      int `json:"line"`
+			Character int `json:"character"`
+		} `json:"end"`
+	} `json:"range"`
+	NewText string `json:"newText"`
+}) []TextEdit {
+	var edits []TextEdit
+	for uri, list := range changes {
+		p := uriToPath(uri)
+		if p == "" {
+			continue
+		}
+		for _, c := range list {
+			edits = append(edits, TextEdit{
+				Path:    p,
+				Line:    c.Range.Start.Line,
+				Col:     c.Range.Start.Character,
+				EndLine: c.Range.End.Line,
+				EndCol:  c.Range.End.Character,
+				NewText: c.NewText,
+			})
+		}
+	}
+	return edits
+}
+
 // stop gracefully shuts the server down (best-effort, 2s cap) then kills it.
 func (s *Server) stop() error {
 	s.mu.Lock()
@@ -333,6 +549,7 @@ type Manager struct {
 	enabled bool
 	servers map[string]string // lang -> binary
 	env     []string          // extra env for spawned servers (tests)
+	dir     string            // working dir for spawned servers (tests; empty = inherit)
 
 	mu     sync.Mutex
 	active map[string]*Server // lang -> server
@@ -375,6 +592,30 @@ func (m *Manager) Diagnostics(path, content string) []Diagnostic {
 	return srv.getDiagnostics(path)
 }
 
+// Rename requests a symbol rename at (line, col) [0-based] in path and
+// returns the resulting TextEdits (usually spanning several files).
+// Best-effort: nil when disabled, unsupported extension, server missing, or
+// the server rejects the rename (symbol not found, no rename support).
+func (m *Manager) Rename(path string, line, col int, newName string) []TextEdit {
+	if !m.Enabled() {
+		return nil
+	}
+	lang, _ := langForPath(path)
+	if lang == "" {
+		return nil
+	}
+	srv := m.serverFor(lang)
+	if srv == nil {
+		return nil
+	}
+	edits, err := srv.rename(path, line, col, newName)
+	if err != nil {
+		log.Printf("lsp: rename %s:%d:%d -> %s: %v", path, line, col, newName, err)
+		return nil
+	}
+	return edits
+}
+
 // serverFor lazily starts the server for lang; nil when unavailable.
 func (m *Manager) serverFor(lang string) *Server {
 	m.mu.Lock()
@@ -389,7 +630,7 @@ func (m *Manager) serverFor(lang string) *Server {
 	if _, err := exec.LookPath(bin); err != nil {
 		return nil // silent skip — no hard dependency
 	}
-	s, err := startServerWithEnv(lang, bin, m.env)
+	s, err := startServerWithEnv(lang, bin, m.env, m.dir)
 	if err != nil {
 		log.Printf("lsp: failed to start %s: %v", bin, err)
 		return nil
@@ -465,6 +706,18 @@ func Diagnostics(path, content string) []Diagnostic {
 		return nil
 	}
 	return m.Diagnostics(path, content)
+}
+
+// Rename requests a symbol rename at (line, col) via the global manager.
+// Mirrors Diagnostics; returns nil when no manager is configured.
+func Rename(path string, line, col int, newName string) []TextEdit {
+	defaultMu.Lock()
+	m := defaultMgr
+	defaultMu.Unlock()
+	if m == nil {
+		return nil
+	}
+	return m.Rename(path, line, col, newName)
 }
 
 // KillAll stops all language servers tracked by the global manager.
@@ -547,12 +800,16 @@ func uriToPath(uri string) string {
 	return p
 }
 
-// startServerWithEnv is startServer with an optional extra environment (used
-// by tests to point at a fake server binary).
-func startServerWithEnv(lang, bin string, env []string) (*Server, error) {
+// startServerWithEnv is startServer with an optional extra environment and
+// working directory (used by tests to point at a fake server binary or to
+// spawn gopls inside a temp module so its workspace root matches the files).
+func startServerWithEnv(lang, bin string, env []string, dir string) (*Server, error) {
 	cmd := exec.Command(bin)
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
+	}
+	if dir != "" {
+		cmd.Dir = dir
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -581,7 +838,7 @@ func startServerWithEnv(lang, bin string, env []string) (*Server, error) {
 	// LSP handshake: initialize (request) -> initialized (notification).
 	if _, err := s.send("initialize", map[string]interface{}{
 		"processId":    os.Getpid(),
-		"clientInfo":   map[string]interface{}{"name": "eling", "version": "0.2.4"},
+		"clientInfo":   map[string]interface{}{"name": "eling", "version": "0.4.4"},
 		"capabilities": map[string]interface{}{},
 	}, true); err != nil {
 		_ = s.stop()

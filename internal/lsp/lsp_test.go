@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // ── Unit: URI / path round-trip ──────────────────────────────────────────────
@@ -113,9 +115,15 @@ func TestFakeLSPHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
-// fakeLSPMain answers initialize and publishes one error diagnostic on didOpen.
+// fakeLSPMain answers initialize, publishes one error diagnostic on didOpen,
+// and handles textDocument/rename. On the first rename it first pushes a
+// workspace/applyEdit request (proving the client acks it — handleApplyEdit +
+// respond — without deadlocking), then answers the rename after the ack.
 func fakeLSPMain() {
 	r := bufio.NewReader(os.Stdin)
+	pendingRename := false
+	var pendingRenameID json.RawMessage
+	var pendingRenameURI, pendingNewName string
 	for {
 		msg, err := readMessage(r)
 		if err != nil {
@@ -129,21 +137,45 @@ func fakeLSPMain() {
 		if err := json.Unmarshal(msg, &req); err != nil {
 			continue
 		}
-		if req.ID != nil {
-			// Respond to initialize with minimal capabilities.
+		if req.Method == "" && req.ID != nil {
+			// Response to a request we sent (workspace/applyEdit ack).
+			// Now we can answer the queued rename.
+			if pendingRename {
+				pendingRename = false
+				resp, _ := json.Marshal(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      json.RawMessage(pendingRenameID),
+					"result": map[string]interface{}{
+						"changes": map[string]interface{}{
+							pendingRenameURI: []map[string]interface{}{
+								{
+									"range": map[string]interface{}{
+										"start": map[string]interface{}{"line": 2, "character": 5},
+										"end":   map[string]interface{}{"line": 2, "character": 9},
+									},
+									"newText": pendingNewName,
+								},
+							},
+						},
+					},
+				})
+				_ = writeMessage(os.Stdout, resp)
+			}
+			continue
+		}
+		switch req.Method {
+		case "initialize":
 			resp, _ := json.Marshal(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      json.RawMessage(req.ID),
 				"result": map[string]interface{}{
 					"capabilities": map[string]interface{}{
 						"textDocumentSync": 1,
+						"renameProvider":   true,
 					},
 				},
 			})
 			_ = writeMessage(os.Stdout, resp)
-			continue
-		}
-		switch req.Method {
 		case "textDocument/didOpen":
 			var p struct {
 				TextDocument struct {
@@ -170,6 +202,43 @@ func fakeLSPMain() {
 				},
 			})
 			_ = writeMessage(os.Stdout, diag)
+		case "textDocument/rename":
+			var p struct {
+				TextDocument struct {
+					URI string `json:"uri"`
+				} `json:"textDocument"`
+				NewName string `json:"newName"`
+			}
+			_ = json.Unmarshal(req.Params, &p)
+			pendingRename = true
+			pendingRenameID = req.ID
+			pendingRenameURI = p.TextDocument.URI
+			pendingNewName = p.NewName
+			// Push a workspace/applyEdit request first; the rename answer is
+			// deferred until the client acks it (proves handleApplyEdit +
+			// respond don't deadlock the read loop).
+			apply, _ := json.Marshal(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      9001,
+				"method":  "workspace/applyEdit",
+				"params": map[string]interface{}{
+					"label": "fake rename",
+					"edit": map[string]interface{}{
+						"changes": map[string]interface{}{
+							"file:///tmp/other.go": []map[string]interface{}{
+								{
+									"range": map[string]interface{}{
+										"start": map[string]interface{}{"line": 0, "character": 0},
+										"end":   map[string]interface{}{"line": 0, "character": 5},
+									},
+									"newText": "Other",
+								},
+							},
+						},
+					},
+				},
+			})
+			_ = writeMessage(os.Stdout, apply)
 		}
 	}
 }
@@ -296,5 +365,75 @@ func TestFakeServerViaExec(t *testing.T) {
 	// Read response.
 	if _, err := readMessage(bufio.NewReader(stdout)); err != nil {
 		t.Fatalf("initialize response: %v", err)
+	}
+}
+
+// ── Integration (A6): rename request + server-initiated workspace/applyEdit ──
+
+func TestFakeServerRenameAndApplyEdit(t *testing.T) {
+	if os.Getenv("GO_WANT_LSP_HELPER") == "1" {
+		t.Skip("helper mode")
+	}
+	script := writeFakeLSPHelper(t)
+	m := NewManager(Config{Enabled: true, Servers: map[string]string{"go": script}})
+	defer m.KillAll()
+
+	// Install a hook that records applyEdit pushes (the tools layer normally
+	// installs the real one at init).
+	var (
+		applyMu  sync.Mutex
+		gotApply []TextEdit
+	)
+	SetApplyEditHandler(func(edits []TextEdit) error {
+		applyMu.Lock()
+		gotApply = append(gotApply, edits...)
+		applyMu.Unlock()
+		return nil
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	content := "package main\n\nfunc oldName() {}\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rename at line 2 (0-based), col 5 — the "oldName" identifier.
+	edits := m.Rename(path, 2, 5, "newName")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 rename edit, got %d: %+v", len(edits), edits)
+	}
+	e := edits[0]
+	if e.Path != path || e.Line != 2 || e.Col != 5 || e.EndCol != 9 || e.NewText != "newName" {
+		t.Fatalf("unexpected rename edit: %+v", e)
+	}
+
+	// The fake server pushed a workspace/applyEdit before answering the
+	// rename — the read loop must have acked it (respond) and routed the edit
+	// to the hook. If respond were missing, the fake would hang and the
+	// rename request above would time out; the hook check proves delivery.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		applyMu.Lock()
+		n := len(gotApply)
+		applyMu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("workspace/applyEdit was never delivered to the hook (client likely hung on ack)")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := gotApply[0]; got.Path != "/tmp/other.go" || got.Line != 0 || got.Col != 0 || got.EndCol != 5 || got.NewText != "Other" {
+		t.Fatalf("unexpected applyEdit: %+v", got)
+	}
+}
+
+// ── Unit: parseApplyEdit (bad params → error) ────────────────────────────────
+
+func TestParseApplyEditBadParams(t *testing.T) {
+	if _, err := parseApplyEdit(json.RawMessage(`{"edit":`)); err == nil {
+		t.Fatal("expected error for malformed workspace/applyEdit params")
 	}
 }

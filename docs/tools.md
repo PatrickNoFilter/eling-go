@@ -15,6 +15,7 @@ tool call goes through here.
 | `web.go` / `web_timeout.go` | HTTP fetch with adaptive timeouts |
 | `backup.go` | Timestamped backups + rotation |
 | `ocr.go` | OpenCodeReview integration |
+| `lsp_rename.go` | **LSP symbol rename (A6)** — gopls/pyright/TS rename → backup+lock edits |
 | `sandbox.go` | Phase-1 bash sandbox (namespaces, guards) |
 | `worktree.go` | Phase-1 git worktree management |
 | `semantic.go` | Semantic search index |
