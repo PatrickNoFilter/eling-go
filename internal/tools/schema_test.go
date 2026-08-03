@@ -52,3 +52,22 @@ func TestToProviderDefsRespectsAllowlist(t *testing.T) {
 		}
 	}
 }
+
+// TestToProviderDefsSkipsNoop verifies the P1.6 regression guard: placeholder
+// tools (learned-skill stubs, no-command dynamic tools) marked Noop are never
+// advertised to the LLM, so the tool surface cannot be re-polluted by no-ops.
+func TestToProviderDefsSkipsNoop(t *testing.T) {
+	os.Unsetenv("ELING_TOOLS")
+
+	r := NewRegistry()
+	r.Register(Tool{Name: "real_tool", Description: "does real work"})
+	r.Register(Tool{Name: "noop_stub", Description: "placeholder", Noop: true})
+
+	defs := r.ToProviderDefs()
+	if len(defs) != 1 {
+		t.Fatalf("ToProviderDefs() = %d defs, want 1 (noop must be hidden); got %v", len(defs), defs)
+	}
+	if defs[0].Function.Name != "real_tool" {
+		t.Errorf("advertised tool = %q, want real_tool", defs[0].Function.Name)
+	}
+}

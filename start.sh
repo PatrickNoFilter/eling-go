@@ -17,6 +17,13 @@ CRASH_LOG="$HOME/.eling/crash_report.log"
 # Ensure log directory exists
 mkdir -p "$HOME/.eling"
 
+# P1.8: default tool allowlist — shrinks the function-calling prompt to a
+# curated core so small-context local models fit. User can override with
+# their own ELING_TOOLS before launching.
+if [ -z "${ELING_TOOLS:-}" ]; then
+    export ELING_TOOLS="bash,edit,grep,ls,read,ugrep,web_fetch,web_search,write,create_backup,register_tool,semantic_index,semantic_search,worktree_create,worktree_list,worktree_merge,worktree_remove"
+fi
+
 run_eling() {
     if [ -t 0 ]; then
         # Real terminal: launch TUI

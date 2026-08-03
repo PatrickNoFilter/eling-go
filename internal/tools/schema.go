@@ -269,11 +269,16 @@ func ToolAllowlist() map[string]bool {
 // ToProviderDefs converts registry tools into the function-calling format
 // the provider (DeepSeek/OpenAI-compatible) API expects.
 // When ELING_TOOLS is set, only the listed tools are advertised.
+// Noop placeholder tools (learned-skill stubs, no-command dynamic tools)
+// are never advertised — they perform no work and only pollute the prompt.
 func (r *Registry) ToProviderDefs() []ToolDef {
 	allow := ToolAllowlist()
 	list := r.List()
 	defs := make([]ToolDef, 0, len(list))
 	for _, t := range list {
+		if t.Noop {
+			continue // never advertise placeholder/no-op tools (P1.6)
+		}
 		if allow != nil && !allow[t.Name] {
 			continue
 		}

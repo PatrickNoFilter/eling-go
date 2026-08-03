@@ -38,6 +38,11 @@ type Tool struct {
 	// receive a context carrying this deadline; plain-Execute tools are run
 	// under a goroutine + timer guard so they cannot block past the budget.
 	Timeout time.Duration `json:"-"`
+	// Noop marks a placeholder/stub tool that performs no real work (e.g. a
+	// learned-skill stub or a persisted dynamic tool with no command). Noop
+	// tools are hidden from ToProviderDefs() so they are never advertised to
+	// the LLM, consuming tokens and polluting tool selection. Runtime-only.
+	Noop bool `json:"-"`
 }
 
 // Result wraps a tool execution result.

@@ -2149,6 +2149,7 @@ func (a *Agent) LoadState() error {
 						Description: skillCopy.Description,
 						Version:     "1.0.0",
 						Category:    "skill",
+						Noop:        true, // learned-skill stubs have no real command (P1.6)
 						Execute: func(args map[string]interface{}) (interface{}, error) {
 							return tools.OK(map[string]interface{}{
 								"skill":   skillCopy.Name,
@@ -2221,6 +2222,7 @@ func (a *Agent) restoreDynamicTool(dt tools.DynamicTool) {
 		Description: dt.Description,
 		Version:     "1.0.0",
 		Category:    cat,
+		Noop:        cmd == "", // no command → placeholder stub, never advertise (P1.6)
 		Execute: func(args map[string]interface{}) (interface{}, error) {
 			if cmd != "" {
 				return tools.RunDynamicCommand(cmd, args)
@@ -2361,8 +2363,15 @@ func (a *Agent) SaveState() error {
 	}
 
 	// Save skills — deep-copy under lock to prevent data race with autoLearn()
-	skillsCopy := make([]LearnedSkill, len(a.skills))
-	copy(skillsCopy, a.skills)
+	// P1.6 durability: only persist skills with real usage or high confidence,
+	// so a session holding pre-prune in-memory lists cannot re-pollute
+	// skills.json on its 5-min auto-save or exit (regression guard §9.3).
+	skillsCopy := make([]LearnedSkill, 0, len(a.skills))
+	for _, s := range a.skills {
+		if s.UsedCount > 0 || s.Confidence >= 0.6 {
+			skillsCopy = append(skillsCopy, s)
+		}
+	}
 	if skillData := safeMarshalJSON(skillsCopy); skillData != nil {
 		if err := os.WriteFile(filepath.Join(a.stateDir, "skills.json"), skillData, 0644); err != nil {
 			return err
@@ -2378,8 +2387,16 @@ func (a *Agent) SaveState() error {
 		}
 	}
 
-	// Save dynamic tools
-	if toolData := safeMarshalJSON(tools.GetDynamicTools()); toolData != nil {
+	// Save dynamic tools — P1.6 durability: drop no-command placeholder
+	// entries so tools.json cannot be re-polluted by a stale session.
+	persistedTools := tools.GetDynamicTools()
+	realTools := make([]tools.DynamicTool, 0, len(persistedTools))
+	for _, dt := range persistedTools {
+		if dt.Command != "" {
+			realTools = append(realTools, dt)
+		}
+	}
+	if toolData := safeMarshalJSON(realTools); toolData != nil {
 		if err := os.WriteFile(filepath.Join(a.stateDir, "tools.json"), toolData, 0644); err != nil {
 			return err
 		}
@@ -2909,6 +2926,25 @@ If learn is false: {"learn": false}`
 		return
 	}
 
+	// P1.5: reject canned replies (e.g. "The codebase is indexed! Let me share
+	// a comprehensive architecture overview…") — these are chat boilerplate,
+	// not reusable procedures, and previously polluted skills.json (pattern_88).
+	cannedMarkers := []string{
+		"the codebase is indexed",
+		"let me share a comprehensive architecture overview",
+		"here is a comprehensive",
+		"i would be happy to help",
+		"as an ai",
+	}
+	lowerBody := strings.ToLower(body)
+	lowerName := strings.ToLower(name)
+	for _, m := range cannedMarkers {
+		if strings.Contains(lowerBody, m) || strings.Contains(lowerName, m) {
+			log.Printf("autoLearn: skill %q looks like a canned reply (marker %q), skipping", name, m)
+			return
+		}
+	}
+
 	// Check for duplicates
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -2920,7 +2956,8 @@ If learn is false: {"learn": false}`
 	}
 
 	// Rotate out oldest/least-used skill if at capacity
-	const maxSkills = 100
+	// P1.5: cap lowered from 100 → 25 so the registry can never balloon again.
+	const maxSkills = 25
 	if len(a.skills) >= maxSkills {
 		// Find the skill to evict: lowest UsedCount, then oldest LearnedAt
 		evictIdx := 0
@@ -2940,10 +2977,12 @@ If learn is false: {"learn": false}`
 	}
 
 	// Learn the new skill
+	// P1.5: confidence floor raised 0.5 → 0.6 so weak/tentative patterns
+	// don't get persisted as skills (they were polluting skills.json).
 	skill := LearnedSkill{
 		Name:        name,
 		Description: TruncateStr(body, 100),
-		Confidence:  0.5,
+		Confidence:  0.6,
 		LearnedAt:   time.Now(),
 		UsedCount:   0,
 	}
@@ -2958,6 +2997,7 @@ If learn is false: {"learn": false}`
 			Description: TruncateStr(bodyCopy, 80),
 			Version:     "1.0.0",
 			Category:    "skill",
+			Noop:        true, // learned-skill stubs have no real command (P1.6)
 			Execute: func(args map[string]interface{}) (interface{}, error) {
 				return tools.OK(map[string]interface{}{
 					"skill":   skillCopy.Name,
