@@ -184,41 +184,41 @@ eling autorepair          # or: tools-health
 
 ---
 
-## 8. P0 Execution Log — 2026-08-03 ⚠️ **RE-AUDITED: CLAIMED DONE, BUT NOT ACTUALLY EXECUTED**
+## 8. P0 Execution Log — 2026-08-03 ✅ **EXECUTED FOR REAL (2026-08-03 22:02–22:03 UTC+?)**
 
-**Status: ❌ The P0 prune was documented but never applied to disk.** Commit `0e5f67c` ("docs: P0 tool-surface cleanup…") changed **only this markdown file** — `git show --stat 0e5f67c` → `1 file changed, 223 insertions(+)`. The live registries were **not modified** (re-verified 2026-08-03):
+**Status: ✅ The P0 prune was ACTUALLY applied to disk on 2026-08-03 (~22:02).** The prior claim (`0e5f67c`) was doc-only and is now superseded: the two JSON registries were mutated with `python3` and the post-state **measured from disk** (not from intent). This section records the real execution.
 
-- `~/.eling/skills.json` → **100 entries** (94 with `used_count == 0`)
-- `~/.eling/tools.json` → **119 entries** (103 with no `command`)
-- Contradictory skills **still present**: `replace-ugrep-with-grep`, `fix-grep-built-in-tool`
-- Junk skill **still present**: `pattern_88` (confidence 0.3)
-- The only diff vs the `.bak.20260803_201959` snapshots is one renamed skill (`replace-command-tool` → `implementation-plan-audit`) — i.e. the backups captured the same un-pruned 100/118-entry state, and nothing was ever removed.
+**Prune executed (verified 2026-08-03 ~22:03):**
 
-### 8.1 What was done — **claimed vs actual (verified 2026-08-03)**
+- `~/.eling/skills.json` → **100 → 5 entries** (kept only the 5 with `used_count > 0`; deleted 93 never-used + `pattern_88` (junk, conf 0.3) + `fix-grep-built-in-tool` (contradictory))
+- `~/.eling/tools.json` → **121 → 16 entries** (kept only the 16 with a real `command`; dropped 105 no-command entries incl. `replace-ugrep-with-grep`)
+- Contradictory skills **gone**: `replace-ugrep-with-grep` (was a no-op tool → removed from tools.json), `fix-grep-built-in-tool` (was a skill → removed from skills.json)
+- Junk skill **gone**: `pattern_88` (confidence 0.3)
+- Both pruned files **re-validated** as parseable JSON (`json.load` OK, every entry has `name`)
 
-| Step | Claimed "After" | ✅ Actual state today |
+**Fresh rollback backups created at prune time (`P0PRUNE`):**
+- `/root/.eling/skills.json.bak.P0PRUNE.20260803_220243` (100 entries — un-pruned)
+- `/root/.eling/tools.json.bak.P0PRUNE.20260803_220243` (121 entries — un-pruned)
+- *(plus the earlier `.bak.20260803_201959` snapshots, still intact)*
+
+### 8.1 What was done — **before → after (measured from disk 2026-08-03)**
+
+| Step | Before (pre-prune) | ✅ After (measured) |
 |---|---|---|
-| `~/.eling/skills.json` | 5 entries (all used) | **100 entries, 94 unused** — unchanged |
-| `~/.eling/tools.json` | 16 entries (all real) | **119 entries, 103 no-op** — unchanged |
-| Contradictory skills | 0 | **2 still present** (`replace-ugrep-with-grep`, `fix-grep-built-in-tool`) |
-| Junk skill `pattern_88` (conf 0.3) | 0 | **1 still present** |
+| `~/.eling/skills.json` | 100 entries, 94 unused | **5 entries — all used** (`race-condition-and-crash-audit`, `update-eling-config-base-url`, `go-project-verify-rebuild`, `kill-process-by-name`, `session-resume-verification`) |
+| `~/.eling/tools.json` | 121 entries, 105 no-op | **16 entries — all with real `command`** (10 `cbm_*` MCP + `create_backup`, `eling_setup`, `eling-wizard`, `eling_setup_wizard`, `eling-command`, `eling_launcher`) |
+| Contradictory skills | 2 present | **0** (both removed from their respective registries) |
+| Junk skill `pattern_88` (conf 0.3) | 1 present | **0** |
 
-**The "kept 5 / kept 16" lists below are aspirational — they describe what the prune *should* have kept, not what exists on disk.**
+### 8.2 Verification — **post-prune (measured 2026-08-03 ~22:03)**
 
-**Kept skills (5, target):** `race-condition-and-crash-audit`, `update-eling-config-base-url`, `go-project-verify-rebuild`, `kill-process-by-name`, `session-resume-verification`.
-
-**Kept tools (16, target):** the 10 `cbm_*` MCP commands, `create_backup`, `eling_setup`, `eling-wizard`, `eling_setup_wizard`, `eling-command`, `eling_launcher`.
-
-**Backups (rollback point — verified to contain the *un-pruned* state):**
-- `/root/.eling/skills.json.bak.20260803_201959` (100 entries — same as live)
-- `/root/.eling/tools.json.bak.20260803_201959` (118 entries — live has 119, +`implementation-plan-audit`)
-
-### 8.2 Verification — **actual (2026-08-03)**
-
-- `go vet ./...` ✅ exit 0 · `go build ./...` ✅ exit 0 — code tree healthy (unchanged from baseline)
-- **`noop remaining: [103 of 119]`** · **`contradictory/junk remaining: [3]`** — the "noop remaining: []" claim in the original log was never true; it described the intended end-state, not a measured one
-- WIP (lsp_rename, semantic, docs) was indeed committed as **`a1616f1`** — this is the one P0 sub-step that actually landed (tree was clean at that commit)
-- Root cause of the discrepancy: **the "execution log" was written as part of the docs commit itself** (`0e5f67c` = only `ineefectivefunction.md`, +223 lines). The pruning steps (python/jq mutations of the two JSONs) were **never run**.
+- Prune script output: `SKILLS: 100 -> 5 kept, 95 removed` · `TOOLS: 121 -> 16 kept, 105 removed`
+- Removal breakdown (skills): 93 never-used · 1 junk (`pattern_88`) · 1 contradictory (`fix-grep-built-in-tool`) — total 95
+- Removal (tools): 105 no-command entries, including `replace-ugrep-with-grep` (the 2nd contradictory item was a *tool*, not a skill)
+- Post-prune validation: `skills.json` 5 entries, `tools.json` 16 entries — both `json.load` clean, all entries named
+- **`noop remaining: [0]`** · **`contradictory/junk remaining: [0]`** — measured from disk
+- `go vet ./...` / `go build ./...`: unchanged, healthy (no Go code touched by P0)
+- ⚠️ **Restart pending:** the *running* ELING process (PID 21520) still holds the pre-prune in-memory lists and will re-save them on its 5-min auto-save or on exit. **A restart is required to lock in the prune** (plan §9.2 step 1). Until restart, the on-disk state is pruned but the live session still advertises the old surface.
 
 ### 8.3 Remaining (P1/P2 — see §4) — **status verified 2026-08-03**
 
@@ -229,13 +229,13 @@ eling autorepair          # or: tools-health
   - `ELING_TOOLS` default allowlist in `start.sh` — **not set** (`grep ELING_TOOLS start.sh` → 0 matches; `ToolAllowlist()` exists at `schema.go:254` but no default is exported)
 - **P2 — NOT done:** wire-or-delete `skills/hermes/` (9 scripts, no daemon) · remove dead `Registry.Categories()` (0 callers, `registry.go:186`) · exercise autorepair quarantine (`~/.eling/autorepair_state.json` absent → never triggered) · add boot-time tool-surface audit log
 
-### 8.4 Expected effect after next boot — **NOT achieved**
+### 8.4 Expected effect after next boot — **P0 applied; effect pending restart**
 
-The advertised surface is still ~140 tools / ~3,850 tokens per turn. Until P0 (actual JSON prune) + P1 (code gates) land, nothing changes at boot:
+P0 (the JSON prune) is now **actually applied on disk**: skills 100→5, tools 121→16, no-ops 0, contradictory/junk 0. The advertised surface at **next boot** will drop from ~140 → **~44** (23 built-in + 16 persisted + 5 skills), and token cost per turn from ~3,850 → **~1,100** (the latter also needs P1.6's no-op filter in `ToProviderDefs()`, which is code-level and not yet done).
 
-- Advertised tools: ~140 → **~44** (23 built-in + 16 persisted + 5 skills) — *only after P0 prune is actually run*
-- Token cost per turn: ~3,850 → **~1,100** — *only after P0 + P1.6*
-- No-op tools: **0** · Contradictory skills: **0** — *only after P0.2/P0.3*
+- Advertised tools: ~140 → **~44** — ✅ P0 applied; **needs restart** (current PID 21520 holds old in-memory lists)
+- Token cost per turn: ~3,850 → **~1,100** — ⏳ after P0 **+ P1.6** code change (not yet implemented)
+- No-op tools: **0** ✅ on disk (P0.3) · Contradictory skills: **0** ✅ (P0.2)
 
 ---
 
@@ -256,11 +256,11 @@ The advertised surface is still ~140 tools / ~3,850 tokens per turn. Until P0 (a
 ### 9.2 Corrected execution order
 
 ```
-0. [was skipped — now first] ACTUALLY prune:
+0. ✅ DONE 2026-08-03 22:02 — ACTUALLY prune (this time for real):
    python3 mutate ~/.eling/skills.json 100→5 (keep the 5 used)
-   python3 mutate ~/.eling/tools.json 119→16 (keep real commands)
-   (rollback: existing .bak.20260803_201959 backups)
-1. go vet/build + restart → verify advertised count (~44)
+   python3 mutate ~/.eling/tools.json 121→16 (keep real commands)
+   rollback: .bak.P0PRUNE.20260803_220243 (100/121) + .bak.20260803_201959
+1. ⏳ go vet/build + restart → verify advertised count (~44) — RESTART PENDING (PID 21520)
 2. P1.5 code: maxSkills 25, confidence≥0.6, canned-reply filter, dedupe-before-learn
 3. P1.6 code: ToProviderDefs() skips no-op/placeholder Execute
 4. P1.8: ELING_TOOLS default in start.sh
@@ -274,6 +274,8 @@ The advertised surface is still ~140 tools / ~3,850 tokens per turn. Until P0 (a
 - **Boot audit log:** `advertised=N real=M noop=K unused=J` (P2.12) makes doc-only "prunes" visible immediately.
 - **No-op regression test:** assert `ToProviderDefs()` output contains zero tools with empty command/placeholder description.
 
-### 9.4 Live proof (this session)
+### 9.4 Live proof — **partially resolved (disk pruned 2026-08-03 22:02; session restart pending)**
 
-The current agent session still advertises all ~140 polluted tools (`pattern_88`, `replace-ugrep-with-grep`, `fix-grep-built-in-tool`, …) and calling the "kept" skill `go-project-verify-rebuild` returned the no-op stub *"Skill executed — follow the description guidance"* instead of running vet/build — demonstrating the exact root cause §2.1 describes, still live.
+The agent session that *wrote* this audit (before 22:02) still advertised all ~140 polluted tools and calling the "kept" skill `go-project-verify-rebuild` returned the no-op stub *"Skill executed — follow the description guidance"* instead of running vet/build — demonstrating the exact root cause §2.1 describes.
+
+**As of 22:03 the disk registries are pruned** (skills 5, tools 16, no-ops 0) and re-validated. The *current live session* (PID 21520) still runs with the old in-memory tool list and will re-save it on the next 5-min auto-save or on exit — **so the fix is locked in only after restart** (see §9.2 step 1).
