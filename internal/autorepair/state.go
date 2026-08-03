@@ -109,13 +109,16 @@ type recordedState struct {
 	repeated int // consecutive identical errors
 }
 
-// Engine is the top-level Phase-0 detector. It collects failures per tool and
-// computes "is this tool broken, and does it need autofix?".
+// Engine is the top-level detector. It collects failures per tool and computes
+// "is this tool broken, and does it need autofix?" (Phase 0), and in Phase 1
+// holds the idempotent fixer table + the opt-in autofix gate.
 type Engine struct {
 	mu        sync.RWMutex
 	records   map[string]*recordedState
 	window    time.Duration
 	threshold int
+	fixers    []Fixer
+	autofixOn bool
 }
 
 // New returns a new Engine. window is the rolling window over which failures are
@@ -132,6 +135,7 @@ func New(window time.Duration, threshold int) *Engine {
 		records:   make(map[string]*recordedState),
 		window:    window,
 		threshold: threshold,
+		fixers:    buildBuiltinFixers(),
 	}
 }
 

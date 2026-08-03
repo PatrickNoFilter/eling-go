@@ -42,3 +42,14 @@ func RecordFailure(name, errMsg string, elapsed time.Duration, panicked bool) {
 	}
 	Default().judge(name, errMsg, elapsed, panicked)
 }
+
+// SetAutofixEnabled toggles the process-wide opt-in autofix gate.
+func SetAutofixEnabled(on bool) { Default().SetAutofix(on) }
+
+// RepairTool drives a probe-gated repair for one tool (Phase 1). By default
+// autofix is off, so it reports the advisory; with autofix on it applies the
+// safe, idempotent fix and verifies via post-probe.
+func RepairTool(tool string) RepairResult { return Default().Repair(tool) }
+
+// RepairAllTools attempts repairs for every tracked tool and returns the rows.
+func RepairAllTools() []RepairResult { return Default().RepairAll() }

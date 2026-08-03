@@ -1,6 +1,6 @@
 # 🔧 Auto-Repair Tools Mechanism — `autorepairtools.md`
 
-**Status:** PLAN — Phase 0 ✅ DONE (instrumentation live); Phases 1–3 pending
+**Status:** PLAN — Phase 0 ✅ DONE, Phase 1 ✅ DONE (probe-first fixers live); Phases 2–3 pending
 **Owner:** ELING
 **Branch:** main
 **Grounded in:** `internal/tools/registry.go` (Registry, Tool, ExecuteContext, Execute, Stats, metrics), `internal/tools/register.go` (DynamicTool persistence → `state/tools.json`), tool init() self-registration per file (`bash.go`, `files.go`, `web.go`, `web_timeout.go`, `sandbox.go`, `ocr.go`, `setup.go`, `semantic.go`, `worktree.go`, `backup.go`, `schema.go`).
@@ -203,12 +203,34 @@ Expose TUI splash indicator count=  of disabled tools, plus "warning" list in st
   + `./internal/autorepair/` pass. (Race detector unsupported in this sandbox VMA;
   verified via concurrent-record test + mutex discipline.)
 
-### Phase 1 — Probe-first fixers for the 3 safest classes
+### Phase 1 — Probe-first fixers for the 3 safest classes ✅ DONE
 - Implement `repairer.go` + `autofix_db.go` for:
   - `MissingBinary` (which→install→which-probe)
   - `ConfigDrift` (config read-back + `/models` HTTP probe)
   - `Env` (re-export token probes)
 - Each fixer is idempotent + Probe-gated; `autofix` flag default **false**.
+
+**Phase 1 deliverables (committed):**
+- `internal/autorepair/repairer.go` — `Fixer` recipe type (Tool/Class/Summary/Probe/Fix/Destructive),
+  `repairability()` weighted score, `Repair()` probe→(gate)→fix→post-probe funnel, `RepairAll()`,
+  `RegisterFixer(s)`, `SetAutofix`/`AutofixEnabled`, `SummaryLines`/`Compact`.
+- `internal/autorepair/autofix_db.go` — `buildBuiltinFixers()`: grounded recipes for
+  `ocr` (npm -g install, `probeExecutable`), `grep`→`ugrep` (MissingBinary + ConfigDrift wrapper
+  repair with `.bak`), provider `/models` probe (`probeProviderModels`), env token probe
+  (advisory fetch, non-destructive).
+- `internal/autorepair/hook.go` — extended with `RepairTool` / `RepairAllTools` / `SetAutofixEnabled`.
+- **Key safety fix:** `Repair().Tried` is now set **only when a fix is actually attempted** (autofix on +
+  probe unhealthy), never when autofix is off. This preserves the "autofix off = pure advisory, no mutation"
+  guarantee that Phase 1 explicitly requires.
+- `internal/autorepair/repair_test.go` — **8 new Phase-1 tests**:
+  autofix-off-is-advisory (no mutation), probe-first-verifies (no-op on healthy), autofix-on
+  applies+verifies, destructive-never-auto-runs, exact-beats-wildcard, no-recipe-is-advisory,
+  repairability-scoring, autofix-toggle.
+- Status: `go vet ./...` clean, `go build ./...` clean, `go test ./internal/autorepair/`
+  (15 tests) + `./internal/tools/` pass.
+
+> Note: destructive + env-token recipes are surfaced as **advisory** (never auto-run), even with
+> autofix enabled. Actual destructive/config-write autofix stays gated for Phase 3.
 
 ### Phase 2 — Quarantine + TUI + stats
 - `quarantiner.go`, `tools_health` command, `autorepair` status in stats dashboard.
