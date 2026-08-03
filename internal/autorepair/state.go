@@ -119,11 +119,18 @@ type Engine struct {
 	threshold int
 	fixers    []Fixer
 	autofixOn bool
+
+	// Phase 2: quarantine persistence. quarantines holds the currently
+	// disabled tools (with reason + timestamp); statePath is where quota
+	// records are persisted across restarts (~/.eling/autorepair_state.json).
+	quarantines map[string]QuarantineRecord
+	statePath   string
+	stateLoaded bool
 }
 
 // New returns a new Engine. window is the rolling window over which failures are
-// counted (default 5m when zero); threshold is the number of repeated failures
-// required to mark a tool broken (default 3 when zero).
+// counted (0 default 5m); threshold is the number of repeated failures required
+// to mark a tool broken (0 default 3).
 func New(window time.Duration, threshold int) *Engine {
 	if window <= 0 {
 		window = 5 * time.Minute
@@ -132,10 +139,12 @@ func New(window time.Duration, threshold int) *Engine {
 		threshold = 3
 	}
 	return &Engine{
-		records:   make(map[string]*recordedState),
-		window:    window,
-		threshold: threshold,
-		fixers:    buildBuiltinFixers(),
+		records:     make(map[string]*recordedState),
+		window:      window,
+		threshold:   threshold,
+		fixers:      buildBuiltinFixers(),
+		quarantines: make(map[string]QuarantineRecord),
+		statePath:   defaultStatePath(),
 	}
 }
 

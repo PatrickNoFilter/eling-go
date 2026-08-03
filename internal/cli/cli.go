@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"eling/internal/agent"
+	"eling/internal/autorepair"
 	"eling/internal/config"
 	"eling/internal/layers"
 	"eling/internal/learnings"
@@ -107,6 +108,10 @@ func RunCLI(cfg *config.Config, version string, args []string) bool {
 		return cmdVersionedUpdate(cfg, subArgs)
 	case "undo-version":
 		return cmdUndoVersion(cfg, subArgs)
+	case "autorepair":
+		return cmdAutorepair(cfg, subArgs)
+	case "tools-health", "health":
+		return cmdAutorepair(cfg, subArgs)
 	case "help", "--help", "-h":
 		printHelp()
 		return true
@@ -887,6 +892,97 @@ func cmdLearnings(cfg *config.Config, args []string) bool {
 		fmt.Printf("  %d. %s\n", i+1, l)
 	}
 	return true
+}
+
+// ── Autorepair Command (A14 / Phase 2) ──────────────────────────────────
+// `eling autorepair` shows a tool-health dashboard: per-tool verdicts from the
+// autorepair engine plus the persisted quarantine list.
+//
+// Subcommands:
+//   eling autorepair reenable <tool>   Manual re-enable of a quarantined tool
+//   eling autorepair autofix on|off      Toggle the opt-in autofix gate
+//   eling autorepair                        (dashboard)
+func cmdAutorepair(cfg *config.Config, args []string) bool {
+	// Load persisted quarantine state so a fresh CLI process reflects last run.
+	autorepair.LoadQuarantineState()
+
+	if len(args) > 0 {
+		switch args[0] {
+		case "reenable":
+			if len(args) < 2 {
+				fmt.Println("Usage: eling autorepair reenable <tool>")
+				return true
+			}
+			tool := args[1]
+			if autorepair.Reenable(tool) {
+				fmt.Printf("✅ Tool %q re-enabled (removed from quarantine).\n", tool)
+			} else {
+				fmt.Printf("ℹ️ Tool %q was not quarantined; nothing to re-enable.\n", tool)
+			}
+			return true
+		case "autofix":
+			if len(args) < 2 {
+				fmt.Printf("autofix is currently %s\n", onOff(autorepair.Default().AutofixEnabled()))
+				return true
+			}
+			switch args[1] {
+			case "on":
+				autorepair.SetAutofixEnabled(true)
+				fmt.Println("autofix ENABLED — repairs may mutate environment (probe-first).")
+			case "off":
+				autorepair.SetAutofixEnabled(false)
+				fmt.Println("autofix DISABLED (safe default).")
+			default:
+				fmt.Println("Usage: eling autorepair autofix on|off")
+			}
+			return true
+		case "help", "--help", "-h":
+			fmt.Println(`Usage:
+  eling autorepair                        Tool-health dashboard
+  eling autorepair reenable <tool>       Re-enable a quarantined tool
+  eling autorepair autofix <on|off>      Toggle the autofix gate`)
+			return true
+		}
+	}
+
+	// ── Dashboard ──
+	rows, summary := autorepair.Default().Dashboard()
+	fmt.Println("🛠️  Tool Auto-Repair — health dashboard")
+	fmt.Println(strings.Repeat("─", 60))
+	fmt.Printf("  tracked: %d   broken: %d   autofix: %d   advisory: %d   quarantined: %d   retry: %d\n",
+		summary.TotalTracked, summary.Broken, summary.Autofix, summary.Advisory, summary.Quarantine, summary.Transient)
+
+	if len(rows) == 0 {
+		fmt.Println("\n  No tool failures recorded in the current window — all healthy.")
+	} else {
+		fmt.Printf("\n  %-22s %-16s %-10s %s\n", "Tool", "Class", "Verdict", "Reason")
+		fmt.Println(strings.Repeat("─", 60))
+		for _, r := range rows {
+			fmt.Printf("  %-22s %-16s %-10s %s\n",
+				autorepair.Compact(r.Tool, 22), r.ClassLabel, r.VerdictLabel, truncateStr(r.Reason, 40))
+		}
+	}
+
+	// ── Quarantine list ──
+	if q := autorepair.QuarantinedTools(); len(q) > 0 {
+		fmt.Println("\n🚫 Quarantined / disabled tools:")
+		for _, rec := range q {
+			fmt.Printf("  - %s [%s] %s (since %s)\n", rec.Tool, rec.ClassLabel, truncateStr(rec.Reason, 46), rec.DisabledAt)
+		}
+		fmt.Println("\n  Re-enable with: eling autorepair reenable <tool>")
+	} else if summary.Quarantine == 0 {
+		fmt.Println("\n  No quarantined tools.")
+	}
+
+	fmt.Println("\n  • autofix:", onOff(autorepair.Default().AutofixEnabled()))
+	return true
+}
+
+func onOff(b bool) string {
+	if b {
+		return "ON"
+	}
+	return "OFF"
 }
 
 // ── Config Commands ───────────────────────────────────────────────────────
@@ -2252,6 +2348,12 @@ Versioning (Memvid-inspired):
 
 Statistics:
   stats                      Show brain statistics
+
+Tool Auto-Repair (A14):
+  autorepair                 Show tool-health dashboard (verdicts + quarantine)
+  autorepair reenable <tool>  Re-enable a quarantined tool
+  autorepair autofix on|off   Toggle the opt-in autofix gate
+  tools-health                Alias for the autorepair dashboard
 
 Configuration:
   setup [--list]            Enter the setup wizard (interactive)

@@ -7,8 +7,8 @@ import (
 
 // defaultEng holds the process-wide detector used by the registry hook.
 var (
-	defaultOnce  sync.Once
-	defaultEngine *Engine
+	defaultOnce    sync.Once
+	defaultEngine  *Engine
 )
 
 // Default returns the package-wide Engine (created lazily). All registry hooks
@@ -28,20 +28,46 @@ func ResetDefault(e *Engine) {
 }
 
 // RecordFailure is the registry hook entry point. It is called from the tools
-// registry's ExecuteContext defer block after a failed tool call. In Phase 0 it
-// records + classifies only; it returns nothing and never mutates the env.
+// registry's ExecuteContext defer block after a failed tool call. It records +
+// classifies the failure and returns the classified result so the registry can
+// act on a QUARANTINE verdict (disable the tool). It never mutates the
+// environment itself.
 //
 //   - name: the tool name (e.g. "web_fetch", "bash")
 //   - errMsg: the error string from the tool (may be empty on panic, in which
 //     case panicked=true carries the signal)
 //   - elapsed: wall-clock taken by the call
 //   - panicked: true if the panic guard recovered
-func RecordFailure(name, errMsg string, elapsed time.Duration, panicked bool) {
+func RecordFailure(name, errMsg string, elapsed time.Duration, panicked bool) ClassifiedFailure {
 	if name == "" {
-		return
+		return ClassifiedFailure{}
 	}
-	Default().judge(name, errMsg, elapsed, panicked)
+	return Default().judge(name, errMsg, elapsed, panicked)
 }
+
+// Quarantine records a tool as disabled (persisted to state). The registry
+// hook calls this when RecordFailure returns a QUARANTINE verdict, then marks
+// the tool disabled so it is no longer offered to the LLM.
+func Quarantine(tool, classLabel, reason, lastErr string) {
+	Default().Quarantine(tool, classLabel, reason, lastErr)
+}
+
+// Reenable removes a tool from quarantine (manual re-enable). Returns true when
+// the tool was actually quarantined and has now been cleared.
+func Reenable(tool string) bool { return Default().Reenable(tool) }
+
+// IsQuarantined reports whether a tool is currently quarantined.
+func IsQuarantined(tool string) bool { return Default().IsQuarantined(tool) }
+
+// QuarantinedTools lists all currently quarantined tools (persisted).
+func QuarantinedTools() []QuarantineRecord { return Default().Quarantined() }
+
+// CountQuarantined returns how many tools are quarantined (TUI indicator).
+func CountQuarantined() int { return Default().CountQuarantined() }
+
+// LoadQuarantineState loads persisted quarantine records into the engine
+// (called once at startup so the TUI/CLI reflect disabled tools from last run).
+func LoadQuarantineState() { Default().LoadState() }
 
 // SetAutofixEnabled toggles the process-wide opt-in autofix gate.
 func SetAutofixEnabled(on bool) { Default().SetAutofix(on) }

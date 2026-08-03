@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"eling/internal/agent"
+	"eling/internal/autorepair"
 	"eling/internal/lsp"
 	"eling/internal/tools"
 
@@ -1405,8 +1406,20 @@ func (m Model) View() string {
 	if tools.SandboxEnabled() {
 		sandboxStr = "🏝️ snd on"
 	}
-	header := hdrSty.Render(fmt.Sprintf(" %s%s  mem %d  mcp %d  tls %d  skl %d  %s",
-		clock, elapsedStr, s["memory_items"], s["mcp_servers"], s["tools_available"], s["learned_skills"], sandboxStr))
+	qcount := autorepair.CountQuarantined()
+	head := fmt.Sprintf(" %s%s  mem %d  mcp %d  tls %d  skl %d  %s",
+		clock, elapsedStr, s["memory_items"], s["mcp_servers"], s["tools_available"], s["learned_skills"], sandboxStr)
+	if qcount > 0 {
+		head += fmt.Sprintf("  ⚠️ q %d", qcount)
+		if qrecs := autorepair.QuarantinedTools(); len(qrecs) > 0 {
+			var qnames []string
+			for _, qr := range qrecs {
+				qnames = append(qnames, qr.Tool)
+			}
+			head += " [" + strings.Join(qnames, ", ") + "]"
+		}
+	}
+	header := hdrSty.Render(head)
 
 	// Agent name shown above the input area, with spinner before and token info after
 	statusIndicator := "●"
@@ -1458,7 +1471,7 @@ func (m Model) View() string {
 // legendText builds the abbreviation legend (mem/mcp/tls/skl/snd) and wraps
 // it to the given terminal width so the explanation never overflows the TUI.
 func legendText(width int) string {
-	text := "  mem=memory  ·  mcp=MCP servers  ·  tls=tools  ·  skl=skills  ·  snd=sandbox"
+	text := "  mem=memory  ·  mcp=MCP servers  ·  tls=tools  ·  skl=skills  ·  snd=sandbox  ·  q=quarantined tools"
 	return dimSty.Render(wrapText(text, width))
 }
 

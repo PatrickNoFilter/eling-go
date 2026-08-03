@@ -1,6 +1,6 @@
 # 🔧 Auto-Repair Tools Mechanism — `autorepairtools.md`
 
-**Status:** PLAN — Phase 0 ✅ DONE, Phase 1 ✅ DONE (probe-first fixers live); Phases 2–3 pending
+**Status:** PLAN — Phase 0 ✅ DONE, Phase 1 ✅ DONE (probe-first fixers live), Phase 2 ✅ DONE (quarantine + `autorepair`/`tools-health` CLI + TUI indicator); Phase 3 pending
 **Owner:** ELING
 **Branch:** main
 **Grounded in:** `internal/tools/registry.go` (Registry, Tool, ExecuteContext, Execute, Stats, metrics), `internal/tools/register.go` (DynamicTool persistence → `state/tools.json`), tool init() self-registration per file (`bash.go`, `files.go`, `web.go`, `web_timeout.go`, `sandbox.go`, `ocr.go`, `setup.go`, `semantic.go`, `worktree.go`, `backup.go`, `schema.go`).
