@@ -85,11 +85,23 @@ func init() {
 		Timeout:     fileToolTimeout,
 	})
 
-	// Register grep tool (code search, like jcode's agentgrep)
+	// Register the preferred ugrep search tool. The legacy "grep" tool below
+	// is a deprecated alias for the same engine — the agent prompt enforces
+	// calling `ugrep` for all text searches.
+	DefaultRegistry.Register(Tool{
+		Name:        "ugrep",
+		Description: "Search for text patterns in files using ugrep 7.5.0 (preferred text-search tool — executes ugrep directly; the legacy 'grep' tool is a deprecated alias for this same engine). Supports recursive directory search, regex, file-type filtering (-t), fuzzy search (-Z), word boundary (-w), fixed strings (-F), smart case (-S), multiline (-U), JSON/CSV output (--json/--csv), and boolean operators (--bool). Standard grep flags (-rn, -I, -m, --exclude-dir, --include) work unchanged. Prefer this tool over bash grep for all code search.",
+		Version:     "1.1.0",
+		Category:    "system",
+		Execute:     grepExecute,
+		Timeout:     grepToolTimeout,
+	})
+
+	// Register grep tool — DEPRECATED alias for the ugrep tool (same engine).
 	DefaultRegistry.Register(Tool{
 		Name:        "grep",
-		Description: "Search for text patterns in files. Supports recursive directory search, file type filtering, and regex.",
-		Version:     "1.0.0",
+		Description: "DEPRECATED alias for the `ugrep` tool (executes the same ugrep 7.5.0 engine via the /usr/local/bin/grep wrapper). Use the `ugrep` tool instead — this name is kept only for backward compatibility.",
+		Version:     "1.1.0",
 		Category:    "system",
 		Execute:     grepExecute,
 		Timeout:     grepToolTimeout,
@@ -718,8 +730,13 @@ func grepExecute(args map[string]interface{}) (interface{}, error) {
 		maxResults = int(n)
 	}
 
-	// Use grep (system grep — resolves to GNU grep via /usr/local/bin/grep wrapper)
+	// Prefer the ugrep binary directly — the /usr/local/bin/grep wrapper also
+	// prefers ugrep, but resolving ugrep explicitly guarantees every search
+	// runs through ugrep 7.5.0 (fallback: wrapper -> GNU grep).
 	grepBin := "grep"
+	if p, err := exec.LookPath("ugrep"); err == nil {
+		grepBin = p
+	}
 
 	// Build grep command arguments
 	grepArgs := []string{"-rn", "-I"}

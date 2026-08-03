@@ -504,11 +504,27 @@ func (s *Server) registerTools() {
 
 	s.tools["grep"] = ToolDefinition{
 		Name:        "grep",
-		Description: "Search for text patterns in files using grep",
+		Description: "DEPRECATED alias for ugrep — search for text patterns in files using ugrep 7.5.0",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"query":      map[string]interface{}{"type": "string", "description": "Pattern to search"},
+				"query":      map[string]interface{}{"type": "string", "description": "Pattern to search (ugrep)"},
+				"path":       map[string]interface{}{"type": "string", "description": "Directory or file"},
+				"type":       map[string]interface{}{"type": "string", "description": "File extension filter (e.g. 'go')"},
+				"regex":      map[string]interface{}{"type": "boolean", "description": "Use regex", "default": false},
+				"max_results": map[string]interface{}{"type": "integer", "description": "Max matches", "default": 50},
+			},
+			"required": []string{"query"},
+		},
+	}
+
+	s.tools["ugrep"] = ToolDefinition{
+		Name:        "ugrep",
+		Description: "Search for text patterns in files using ugrep 7.5.0 (preferred; legacy 'grep' tool is an alias)",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query":      map[string]interface{}{"type": "string", "description": "Pattern to search (ugrep)"},
 				"path":       map[string]interface{}{"type": "string", "description": "Directory or file"},
 				"type":       map[string]interface{}{"type": "string", "description": "File extension filter (e.g. 'go')"},
 				"regex":      map[string]interface{}{"type": "boolean", "description": "Use regex", "default": false},
@@ -872,7 +888,7 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]i
 		return s.execWrite(args)
 	case "edit":
 		return s.execEdit(args)
-	case "grep":
+	case "grep", "ugrep":
 		return s.execGrep(ctx, args)
 	case "web_search":
 		return s.execWebSearch(ctx, args)

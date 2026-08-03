@@ -97,7 +97,18 @@ var paramSchemas = map[string]map[string]interface{}{
 	"grep": {
 		"type": "object",
 		"properties": map[string]interface{}{
-			"query":       map[string]interface{}{"type": "string", "description": "Pattern to search for (uses GNU grep)."},
+			"query":       map[string]interface{}{"type": "string", "description": "Pattern to search for (uses ugrep 7.5.0)."},
+			"path":        map[string]interface{}{"type": "string", "description": "Directory or file to search in."},
+			"type":        map[string]interface{}{"type": "string", "description": "Optional file extension filter, e.g. 'go'."},
+			"regex":       map[string]interface{}{"type": "boolean", "description": "Treat query as a regular expression."},
+			"max_results": map[string]interface{}{"type": "number", "description": "Maximum number of matches to return."},
+		},
+		"required": []string{"query"},
+	},
+	"ugrep": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"query":       map[string]interface{}{"type": "string", "description": "Pattern to search for (uses ugrep 7.5.0; supports regex, -Z fuzzy, -w word, -F fixed, -S smart case, --bool)."},
 			"path":        map[string]interface{}{"type": "string", "description": "Directory or file to search in."},
 			"type":        map[string]interface{}{"type": "string", "description": "Optional file extension filter, e.g. 'go'."},
 			"regex":       map[string]interface{}{"type": "boolean", "description": "Treat query as a regular expression."},

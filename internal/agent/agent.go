@@ -2506,7 +2506,9 @@ func (a *Agent) buildMessages(prompt string) []provider.Message {
 
 You use tools (defined below as function-calling tools) to accomplish tasks. Use them when needed.
 You have persistent memory, session save/resume, multi-provider support, and auto-learning.
-Always be helpful, precise, and proactive. Think step by step.`
+Always be helpful, precise, and proactive. Think step by step.
+
+SEARCH RULE (enforced): All text searches MUST use ugrep 7.5.0. Call the 'ugrep' tool (preferred — it executes ugrep directly); the legacy 'grep' tool is a DEPRECATED alias for the same engine. NEVER invoke plain GNU grep via bash and never assume GNU-grep-only behavior. Use ugrep-native flags when useful: -Z (fuzzy), -z (compressed archives), -t <type> (file-type filter), -w (word boundary), -F (fixed strings), -S (smart case), -U (multiline), --json/--csv (structured output), --bool (boolean operators). ugrep is a superset, so standard grep flags (-rn, -I, -m, --exclude-dir, --include) pass through unchanged.`
 	}
 
 	// Start with system prompt. If we have a conversation summary, inject it

@@ -147,7 +147,7 @@ func DefaultConfig() *Config {
 		Agent: AgentConfig{
 			DefaultModel:           "deepseek-v4-flash-free",
 			DefaultBaseURL:         "https://opencode.ai/zen/v1",
-			SystemPrompt:           "You are ELING, an auto-learning evolving AI agent.",
+			SystemPrompt:           "You are ELING, an auto-learning evolving AI agent.\n\nSEARCH RULE (enforced): All text searches MUST use ugrep 7.5.0. Call the `ugrep` tool (preferred — it executes ugrep directly); the legacy `grep` tool is a DEPRECATED alias for the same engine. NEVER invoke plain GNU grep via bash and never assume GNU-grep-only behavior. Use ugrep-native flags when useful: -Z (fuzzy), -z (compressed archives), -t <type> (file-type filter), -w (word boundary), -F (fixed strings), -S (smart case), -U (multiline), --json/--csv (structured output), --bool (boolean operators). ugrep is a superset, so standard grep flags (-rn, -I, -m, --exclude-dir, --include) pass through unchanged.",
 			MaxContext:             32768,
 			MaxTurnRounds:          0, // 0 = unlimited (uses MaxInt32 fallback)
 			MaxTurnDuration:        0, // 0 = no wall-clock timeout
