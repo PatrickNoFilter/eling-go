@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"eling/internal/autorepair"
 	"eling/internal/logger"
 )
 
@@ -238,8 +239,10 @@ func (r *Registry) ExecuteContext(ctx context.Context, name string, args map[str
 	}
 
 	start := time.Now()
+	var panicked bool
 	defer func() {
 		if r := recover(); r != nil {
+			panicked = true
 			stack := string(debug.Stack())
 			logger.Global().Error("Tool %q panicked: %v\nStack:\n%s", name, r, stack)
 			logger.WriteCrashReport(fmt.Errorf("tool %q panicked: %v", name, r), stack)
@@ -262,6 +265,17 @@ func (r *Registry) ExecuteContext(ctx context.Context, name string, args map[str
 			m.Failures++
 		}
 		r.mu.Unlock()
+
+		// Auto-repair funnel (Phase 0 — detection/classification only, no
+		// mutation). Funnels every failed tool call into the autorepair engine
+		// so it can "is this tool broken?" and feed the health dashboard.
+		if err != nil {
+			errm := err.Error()
+			if len(errm) > 4000 {
+				errm = errm[:4000]
+			}
+			autorepair.RecordFailure(name, errm, time.Since(start), panicked)
+		}
 	}()
 
 	// Derive the tool's wall-clock budget. An explicit earlier deadline on the
