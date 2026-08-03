@@ -111,12 +111,14 @@ func (e *Engine) DisabledTools() []string {
 	return out
 }
 
-// CompactError renders a shortened, single-line form of an error for dashboards.
+// CompactError renders a shortened, single-line form of an error for
+// dashboards. Invalid UTF-8 bytes are sanitized (Phase 3) so malformed tool
+// output never corrupts the TUI / persisted state.
 func CompactError(err string) string {
 	if err == "" {
 		return ""
 	}
-	s := strings.Join(strings.Fields(err), " ")
+	s := SanitizeUTF8(strings.Join(strings.Fields(err), " "))
 	if len(s) > 90 {
 		return s[:90] + "…"
 	}

@@ -120,6 +120,12 @@ type Engine struct {
 	fixers    []Fixer
 	autofixOn bool
 
+	// Phase 3: bounded retry budget. maxRetries is the per-repair attempt cap
+	// (0 = default 3); backoffBase is the starting delay for exponential
+	// backoff between attempts (0 = default 500ms, doubles per attempt).
+	maxRetries  int
+	backoffBase time.Duration
+
 	// Phase 2: quarantine persistence. quarantines holds the currently
 	// disabled tools (with reason + timestamp); statePath is where quota
 	// records are persisted across restarts (~/.eling/autorepair_state.json).
@@ -143,6 +149,8 @@ func New(window time.Duration, threshold int) *Engine {
 		window:      window,
 		threshold:   threshold,
 		fixers:      buildBuiltinFixers(),
+		maxRetries:  3,
+		backoffBase: 500 * time.Millisecond,
 		quarantines: make(map[string]QuarantineRecord),
 		statePath:   defaultStatePath(),
 	}
@@ -219,3 +227,46 @@ func (e *Engine) windowSize() time.Duration { return e.window }
 
 // thresholdN returns the configured breakage threshold.
 func (e *Engine) thresholdN() int { return e.threshold }
+
+// SetMaxRetries configures the per-repair attempt budget (0 = default 3).
+func (e *Engine) SetMaxRetries(n int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if n <= 0 {
+		n = 3
+	}
+	e.maxRetries = n
+}
+
+// MaxRetries returns the configured per-repair attempt budget.
+func (e *Engine) MaxRetries() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.maxRetries <= 0 {
+		return 3
+	}
+	return e.maxRetries
+}
+
+// backoff returns the exponential backoff delay for attempt n (0-based).
+// Base is 500ms default; delay = base * 2^n, capped at 30s to keep repairs
+// bounded and never blocking a turn for long.
+func (e *Engine) backoff(attempt int) time.Duration {
+	e.mu.RLock()
+	base := e.backoffBase
+	e.mu.RUnlock()
+	if base <= 0 {
+		base = 500 * time.Millisecond
+	}
+	d := base
+	for i := 0; i < attempt; i++ {
+		d *= 2
+		if d >= 30*time.Second {
+			return 30 * time.Second
+		}
+	}
+	if d > 30*time.Second {
+		return 30 * time.Second
+	}
+	return d
+}

@@ -1,6 +1,6 @@
 # 🔧 Auto-Repair Tools Mechanism — `autorepairtools.md`
 
-**Status:** PLAN — Phase 0 ✅ DONE, Phase 1 ✅ DONE (probe-first fixers live), Phase 2 ✅ DONE (quarantine + `autorepair`/`tools-health` CLI + TUI indicator); Phase 3 pending
+**Status:** PLAN — Phase 0 ✅ DONE, Phase 1 ✅ DONE (probe-first fixers live), Phase 2 ✅ DONE (quarantine + `autorepair`/`tools-health` CLI + TUI indicator), Phase 3 ✅ DONE (autofix enablement + exponential backoff + commit guard + docs). All 4 phases implemented and committed (`3e0dade`, `d8f0bf1`, `307773e`, Phase 3).
 **Owner:** ELING
 **Branch:** main
 **Grounded in:** `internal/tools/registry.go` (Registry, Tool, ExecuteContext, Execute, Stats, metrics), `internal/tools/register.go` (DynamicTool persistence → `state/tools.json`), tool init() self-registration per file (`bash.go`, `files.go`, `web.go`, `web_timeout.go`, `sandbox.go`, `ocr.go`, `setup.go`, `semantic.go`, `worktree.go`, `backup.go`, `schema.go`).
@@ -55,15 +55,21 @@ New package: `internal/autorepair/`
 
 ```
 internal/autorepair/
-  detector.go      // classify_failure(): failure → Class
-  classifier.go    // class → {autofixable, severity, strategy}
-  repairer.go      // autofix actions per tool, idempotent
-  quarantiner.go   // safe disable + user alert
-  registry_hook.go // wires into Registry.ExecuteContext
+  detector.go      // classifyClass(): error string → Class; decideVerdict()
+  judge.go         // judge() funnel; SnapshotOf/Dashboard/Summary/DisabledTools
+  repairer.go      // Fixer recipes, repairability(), Repair() probe→gate→fix→post-probe
+  quarantiner.go   // safe disable + persist + manual re-enable
+  hook.go          // RecordFailure/RepairTool/Quarantine/Reenable package entry points
   autofix_db.go    // knowledge table: tool → known fix / probe command
-  state.go         // persist autorepair state to state/autorepair.json
-  detector_test.go / repairer_test.go
+  state.go         // Engine struct; rolling window; quarantine map; retry/backoff config
+  phase3.go        // commit guard (gitTreeDirty) + SanitizeUTF8 hardening
+  *_test.go        // autorepair_test / repair_test / quarantiner_test / phase3_test
 ```
+
+> Note: the plan originally named `classifier.go`/`registry_hook.go`/`health.go`; the
+> implementation consolidated decision logic into `judge.go` and the registry hook
+> into `hook.go` (no separate `health.go` / `breaker.go` / `classifier.go` files exist).
+> Docs below reflect the **actual** file layout.
 
 ### 4.1 Failure classification (`detector.go`)
 
@@ -92,7 +98,7 @@ Rule of thumb for **"broken"** (the core question this plan answers):
 - **Broken (needs a decision)** = ≥ `N` failures in a rolling window with a **non-input-dependent** confidence signal (same error string, timeout/panic, empty/garbage result on valid args). Default `N=3`.
 - **Not broken (no action):** single failure, error is clearly input-validation ("name is required"), marginal latency, transient timeout that recovers.
 
-### 4.2 Repairability decision (breaker.go)
+### 4.2 Repairability decision (`judge.go` + `repairer.go`)
 
 Each `ToolFailure` yields a `RepairVerdict`:
 
@@ -122,59 +128,66 @@ Layered fixers, each **idempotent** and **probe-first**:
 
 | Failure class       | Autofix strategy (examples grounded in real ELING issues) |
 |---------------------|-------------------------------------------------------------|
-| `ClassMissingEnv`   | install/verify binary via package manager (`npm i -g`, `apt`), set exec path, re-run `which` probe |
-| `ClassConfigDrift`  | rewrite `~/.eling/config.yaml` / env / provider base_url from known-good; re-validate via GET `/models` |
-| `ClassEnv`          | re-export `GITHUB_TOKEN` / API keys from credential store into shell env |
-| `ClassCrash`        | source mutation guard (sandbox fix), re-link `grep→ugrep`, `go vet`+`build` to confirm |
+| `ClassMissingDep`   | install/verify binary via package manager (`npm i -g @alibaba-group/open-code-review` for ocr, `apt-get install -y ugrep`), re-run `which` probe |
+| `ClassConfigDrift`  | rewrite `~/.eling/config.yaml` / provider base_url from known-good; re-validate via GET `/models`; repair `/usr/local/bin/grep` wrapper → ugrep (with `.bak`) |
+| `ClassCrash`        | source mutation guard (commit guard in Phase 3), re-link `grep→ugrep`, `go vet`+`build` to confirm; quarantine on panic |
 | `ClassTransient`     | only **backoff + retry** (no code change), auto-resolves |
-| `ClassEnvGeneral`   | generic "resonate fix" probe: run tool help/`--version`, threshold check; else advisory |
+| `ClassContractViolation` / `ClassLogicBug` / `ClassUnknown` | advisory — manual review (no safe auto-recipe) |
 
-Each repairer pattern:
+Each repairer pattern (actual `Fixer` struct in `repairer.go`):
 ```go
-type Repairer struct {
-   Tool    string
-   Class   Class
-   Fix     func(ctx) error            // idempotent
-   Probe   func(ctx) (healthy bool)   // verifies fix worked
-   MaxTries int
+type Fixer struct {
+   Tool        string        // "" = wildcard (any tool of Class)
+   Class       Class
+   Summary     string        // human description of the fix
+   Probe       func() error  // nil = healthy (pre + post gate)
+   Fix         func() error  // idempotent repair
+   Destructive bool          // never auto-run; surfaced as advisory
+   MutatesCode bool          // commit-guard gated in Phase 3
 }
 ```
 
 **Gate:** ALWAYS run `Probe()` before AND after `Fix()`. Never run a Fix if
-pre-probe already healthy in different args.
+pre-probe already healthy. Destructive recipes are never auto-run even with
+autofix on; code-mutating fixes are refused while the git tree is dirty
+(Phase 3 commit guard).
 
 ### 4.4 Quarantine (`quarantiner.go`)
 
 When verdict = QUARANTINE:
-- temporarily disable the tool in `DefaultRegistry` (Unregister / mark `Disabled`), so it's not offered to the LLM.
-- persist quarantine reason + timestamps to `state/autore.json`.
-- surface one clear user-facing message (TUI + log) — "Tool X disabled due to ... : <verdict>".
-- allow manual re-enable (`/enable tool X` or `eling autorepair reenable X`).
+- temporarily disable the tool in `DefaultRegistry` (mark `Disabled` via `Registry.SetDisabled`), so it's not offered to the LLM and refused by `ExecuteContext`.
+- persist quarantine reason + timestamps to `~/.eling/autorepair_state.json` (atomic temp+rename write).
+- surface one clear user-facing message (TUI `⚠️ q <n> [names]` + log) — "Tool X disabled due to ... : <verdict>".
+- allow manual re-enable (`eling autorepair reenable X`).
 
-### 4.5 Health hook into registry (`health.go`)
+### 4.5 Health hook into registry (`hook.go`)
 
 Minimal, non-invasive integration: in `ExecuteContext`'s existing metrics-defer block,
 after recording the failure, call `autorepair.RecordFailure(name, lastErr, elapsed)`.
 That becomes the single funnel. No other code path needs changing. New CLI command
-`eling autorepair` (or a tool `tools_health`) exposes the dashboard:
+`eling autorepair` (or a tool `tools-health` / `health`) exposes the dashboard:
 ```
 Tool            Class      Verdict     Fix         State        LastErr
 web_fetch       transient  retry       -           ok           timeout@12s
-ocr             MissingEnv AUTO-FIX    npm i -g ... fixed       ProbeOK
-MCP:files       Crash      QUARANTINE  -           disabled     panic idx
+ocr             missing_dep autofix    npm i -g ... fixed       ProbeOK
+MCP:files       crash      quarantine  -           disabled     panic idx
 ```
-Expose TUI splash indicator count=  of disabled tools, plus "warning" list in stats.
+Expose TUI splash indicator count = of disabled tools, plus "warning" list in stats.
 
 ---
 
 ## 5. Persistence & Safety
 
-- `state/autorepair.json` (configurable path), rotation via existing `.bak`.
+- `~/.eling/autorepair_state.json` (configurable path via `Engine.statePath`), rotation via existing `.bak`.
 - Quarantine records persist across restarts; health counts reset on restart.
 - Every fix writes a changelog entry (audit trail) and a `.bak` for any file it edits.
 - Default `autofix=false` opt-in gate: ship **detection+advisory** first; enable
   **autofix** via config `autorepair.autofix: true`, so we don't mutate anything
   without consent in the first release.
+- Phase 3 hardening: exponential backoff (base 500 ms, doubling, cap 30 s) + max
+  retries (default 3) bound every repair; code-mutation fixes are refused while
+  the git working tree is dirty (commit guard); non-UTF-8 error bytes are
+  sanitized before recording.
 
 ---
 
@@ -232,14 +245,49 @@ Expose TUI splash indicator count=  of disabled tools, plus "warning" list in st
 > Note: destructive + env-token recipes are surfaced as **advisory** (never auto-run), even with
 > autofix enabled. Actual destructive/config-write autofix stays gated for Phase 3.
 
-### Phase 2 — Quarantine + TUI + stats
+### Phase 2 — Quarantine + TUI + stats ✅ DONE
 - `quarantiner.go`, `tools_health` command, `autorepair` status in stats dashboard.
 - Manual re-enable CLI.
 
-### Phase 3 — Auto-fix enablement, backoff, doc
+**Phase 2 deliverables (committed `307773e`):**
+- `internal/autorepair/quarantiner.go` — quarantine records persisted to
+  `~/.eling/autorepair_state.json` (atomic temp+rename), idempotent `LoadState`,
+  `Reenable`, sorted `Quarantined()` listing, `CountQuarantined` for the TUI.
+- `internal/tools/registry.go` — `SetDisabled`/`IsDisabled`/`Disabled`; `List()`
+  hides disabled tools from the LLM; `ExecuteContext` refuses disabled tools;
+  QUARANTINE verdict from the hook disables + persists + logs.
+- `internal/cli/cli.go` — `eling autorepair` dashboard + `reenable <tool>` +
+  `autofix on|off`; `tools-health` / `health` aliases.
+- TUI header shows `⚠️ q <n> [tool names]` for disabled tools.
+- `quarantiner_test.go` — persistence round-trip, re-enable, listing (fixed the
+  boom_tool/web_tool assertion bug).
+
+### Phase 3 — Auto-fix enablement, backoff, doc ✅ DONE
 - Enable `autorepair.autofix: true` (opt-in), add exponential backoff + max retries,
   update `README.md` / `docs/TOOLS.md`, plus advisory logging for un-UTF8.
 - Harden against mistakes: commit guard before code-mutation fixes.
+
+**Phase 3 deliverables (committed):**
+- `internal/autorepair/phase3.go` — `gitTreeDirty`/`workingTreeDir` commit guard
+  (stub-able via `commitGuardCheck` var) + `SanitizeUTF8` (replaces invalid bytes
+  with U+FFFD so dashboards/state never carry malformed encodings).
+- `internal/autorepair/state.go` — `maxRetries` (default 3) + `backoffBase`
+  (default 500 ms) + `backoff()` exponential doubling capped at 30 s; `SetMaxRetries`.
+- `internal/autorepair/repairer.go` — `Fixer.MutatesCode` flag; `Repair()` now runs a
+  bounded retry loop (Fix → post-probe → backoff → retry, `Attempts` reported);
+  destructive + code-mutating recipes never auto-run; commit guard blocks dirty-tree
+  code fixes.
+- `internal/config/config.go` — `AutorepairConfig{Autofix bool, MaxRetries int}`
+  under `autorepair:` YAML (default `autofix: false`).
+- `main.go` — wires `autorepair.SetAutofixEnabled(cfg.Autorepair.Autofix)`,
+  `SetMaxRetries`, `LoadQuarantineState()` at startup (both CLI and server paths).
+- `internal/autorepair/hook.go` — `RecordFailure` sanitizes non-UTF-8 error strings
+  before recording; `SetMaxRetries` package entry.
+- `internal/autorepair/phase3_test.go` — 8 tests: retry-with-backoff heals,
+  exhausts-budget → advisory, commit guard blocks/allows code mutation,
+  SanitizeUTF8, RecordFailure sanitizes, backoff sequence + cap, SetMaxRetries.
+- `docs/TOOLS.md` — Auto-Repair & Tool Health section (config, CLI, pipeline,
+  safety guarantees).
 
 ---
 
@@ -247,10 +295,12 @@ Expose TUI splash indicator count=  of disabled tools, plus "warning" list in st
 
 - [x] `go vet ./...` clean after each phase.
 - [x] all existing + new tests pass (`go test ./...`).
-- [x] a deliberately-broken tool (e.g. fake `ocrexist_not_found`) is **detected**, classified `MissingEnv`, and (autofix=on) repaired+re-probed green.
-- [x] a deliberately-crashing tool is **quarantined**, not offered to agent output, message surfaced in TUI.
+- [x] a deliberately-broken tool (e.g. fake `exec: "flakyfix": executable file not found`) is **detected**, classified `missing_dep`, and (autofix=on) repaired+re-probed green (verified in `repair_test.go` / `phase3_test.go`).
+- [x] a deliberately-crashing tool is **quarantined**, not offered to agent output, message surfaced in TUI (verified in `autorepair_test.go` / `quarantiner_test.go`).
 - [x] a transient failure (network `sleep 50` timeout) is **not** mutated — only retried with backoff.
-- [x] quarantine + health status persist across restart, re-enable works.
+- [x] quarantine + health status persist across restart, re-enable works (verified in `quarantiner_test.go`).
+- [x] retries are bounded: fix that never heals exhausts `maxRetries` and escalates to advisory, never loops forever (`phase3_test.go`).
+- [x] code-mutation fixes are blocked while the git tree is dirty (commit guard) (`phase3_test.go`).
 
 ---
 
@@ -265,9 +315,9 @@ Expose TUI splash indicator count=  of disabled tools, plus "warning" list in st
 
 ## 9. Open decisions (track before implementation)
 
-1. Where to put the failure-window window & threshold `N/FailureCount` — tune to 3 failures / 5-min window default.
-2. Autofix default on/off — recommendation: **default off** (phase 3 gems this in).
-3. Which repairs count as "destructive" — only non-destructive auto-run in P1.
+1. Where to put the failure-window window & threshold `N/FailureCount` — **RESOLVED**: rolling window default 5 min, threshold 3 repeated identical errors (`Engine.New(0,0)` → `window=5m, threshold=3` in `state.go`).
+2. Autofix default on/off — **RESOLVED**: default **off**; opt-in via config `autorepair.autofix: true` (wired in `main.go` via `SetAutofixEnabled`).
+3. Which repairs count as "destructive" — **RESOLVED**: `Fixer.Destructive` (never auto-run, advisory) and `Fixer.MutatesCode` (commit-guard gated in Phase 3); env-token recipes are advisory (never inject secrets automatically).
 
 ---
 

@@ -42,8 +42,14 @@ func RecordFailure(name, errMsg string, elapsed time.Duration, panicked bool) Cl
 	if name == "" {
 		return ClassifiedFailure{}
 	}
-	return Default().judge(name, errMsg, elapsed, panicked)
+	// Phase 3: sanitize non-UTF-8 bytes before recording so malformed tool
+	// output never corrupts state/dashboards (advisory logging for un-UTF8).
+	return Default().judge(name, SanitizeUTF8(errMsg), elapsed, panicked)
 }
+
+// SetMaxRetries configures the per-repair attempt budget (0 = default 3).
+// Wired from config `autorepair.max_retries` at startup (Phase 3).
+func SetMaxRetries(n int) { Default().SetMaxRetries(n) }
 
 // Quarantine records a tool as disabled (persisted to state). The registry
 // hook calls this when RecordFailure returns a QUARANTINE verdict, then marks

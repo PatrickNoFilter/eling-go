@@ -66,6 +66,12 @@ type Registry struct {
 	// ExecuteContext on every call so the stats dashboard can report
 	// tool-success %, average latency, and per-tool breakdowns.
 	metrics map[string]*toolMetrics
+
+	// disabled marks tools quarantined by the auto-repair subsystem so they are
+	// not offered to the LLM (List) nor executable (Execute/ExecuteContext).
+	// They stay registered in memory — SetDisabled(false) re-enables them
+	// without losing the definition (manual re-enable path).
+	disabled map[string]bool
 }
 
 // NewRegistry creates a new tool registry and registers built-in tools.
@@ -74,9 +80,44 @@ func NewRegistry() *Registry {
 		tools:      make(map[string]Tool),
 		categories: make(map[string][]string),
 		metrics:    make(map[string]*toolMetrics),
+		disabled:   make(map[string]bool),
 	}
 	r.registerBuiltins()
 	return r
+}
+
+// SetDisabled marks a tool disabled (quarantined) or re-enabled. Disabled tools
+// are hidden from List() (so the LLM is never offered them) and refused by
+// Execute/ExecuteContext (so a stale agent turn cannot call them). The Tool
+// definition is retained, so SetDisabled(false) restores it without re-creating.
+func (r *Registry) SetDisabled(name string, disabled bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if disabled {
+		r.disabled[name] = true
+	} else {
+		delete(r.disabled, name)
+	}
+}
+
+// IsDisabled reports whether a tool is currently disabled (quarantined).
+func (r *Registry) IsDisabled(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.disabled[name]
+}
+
+// Disabled returns the names of all currently disabled (quarantined) tools.
+func (r *Registry) Disabled() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.disabled))
+	for n := range r.disabled {
+		if _, ok := r.tools[n]; ok {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // Register adds a tool, replacing any existing tool with the same name.
@@ -119,6 +160,9 @@ func (r *Registry) List() []Tool {
 	defer r.mu.RUnlock()
 	result := make([]Tool, 0, len(r.tools))
 	for _, t := range r.tools {
+		if r.disabled[t.Name] {
+			continue // quarantine: hide disabled tools from the LLM
+		}
 		result = append(result, t)
 	}
 	return result
@@ -233,9 +277,13 @@ func (r *Registry) Execute(name string, args map[string]interface{}) (result int
 func (r *Registry) ExecuteContext(ctx context.Context, name string, args map[string]interface{}) (result interface{}, err error) {
 	r.mu.RLock()
 	t, ok := r.tools[name]
+	dis := r.disabled[name]
 	r.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("tool %q not found", name)
+	}
+	if dis {
+		return nil, fmt.Errorf("tool %q is disabled (quarantined); re-enable with `eling autorepair reenable %s`", name, name)
 	}
 
 	start := time.Now()
@@ -267,14 +315,22 @@ func (r *Registry) ExecuteContext(ctx context.Context, name string, args map[str
 		r.mu.Unlock()
 
 		// Auto-repair funnel (Phase 0 — detection/classification only, no
-		// mutation). Funnels every failed tool call into the autorepair engine
-		// so it can "is this tool broken?" and feed the health dashboard.
+		// mutation, plus Phase 2 quarantine). Funnels every failed tool call
+		// into the autorepair engine so it can ask "is this tool broken?". When
+		// the engine returns a QUARANTINE verdict (crash, or fatal repeated
+		// breakage), disable the tool here so it is no longer offered to the
+		// LLM, persist the reason, and surface a single user-facing message.
 		if err != nil {
 			errm := err.Error()
 			if len(errm) > 4000 {
 				errm = errm[:4000]
 			}
-			autorepair.RecordFailure(name, errm, time.Since(start), panicked)
+			cf := autorepair.RecordFailure(name, errm, time.Since(start), panicked)
+			if cf.Verdict == autorepair.VerdictQuarantine {
+				r.SetDisabled(name, true)
+				autorepair.Quarantine(name, cf.Class.String(), cf.Reason, errm)
+				logger.Global().Info("Tool %q DISABLED (quarantined): %s", name, cf.Reason)
+			}
 		}
 	}()
 

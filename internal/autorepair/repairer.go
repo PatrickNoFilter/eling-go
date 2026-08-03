@@ -3,6 +3,7 @@ package autorepair
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Fixer is a single, idempotent, probe-first repair recipe for one tool
@@ -13,7 +14,7 @@ import (
 // Phase 1 ships these recipes for the three safest classes (MissingBinary,
 // ConfigDrift, Env) but does NOT auto-run them: `autofix` is off by default,
 // so Repair() reports the plan + advisory unless enabled via SetAutofix(true)
-// (wired in Phase 3).
+// (wired in Phase 3 via config `autorepair.autofix`).
 type Fixer struct {
 	Tool        string // tool name the recipe applies to ("" = applies to any tool of Class)
 	Class       Class  // failure class this recipe fixes
@@ -21,6 +22,13 @@ type Fixer struct {
 	Probe       func() error // returns nil when the tool is already healthy
 	Fix         func() error // idempotent repair; must be safe to retry
 	Destructive bool // true when the fix mutates user data / system config
+
+	// MutatesCode is true when the fix rewrites files that belong to the
+	// checked-in source tree (e.g. patching a repo file). Phase 3 adds a
+	// commit guard: such fixes are refused while the working tree has
+	// uncommitted changes, so a repair can never silently mix into (or
+	// destroy) in-progress work.
+	MutatesCode bool
 }
 
 // repairabilityCredits scores a Fixer 0..1 per the plan's weighted formula:
@@ -50,6 +58,7 @@ type RepairResult struct {
 	ProbeOK    bool   `json:"probe_ok"`
 	Fixed      bool   `json:"fixed"`
 	PostOK     bool   `json:"post_ok"`
+	Attempts   int    `json:"attempts"` // Phase 3: retry count used
 	Message    string `json:"message"`
 }
 
@@ -125,10 +134,11 @@ func (e *Engine) fixerFor(tool string, class Class) (Fixer, bool) {
 	return Fixer{}, false
 }
 
-// Repair is the Phase-1 action entry point. Given a tool that the detector
-// flagged AutoFix, it looks up a fixer and, if autofix is enabled and the
-// fixer is non-destructive, runs it probe-first. Otherwise it returns the
-// plan + advisory without mutating anything.
+// Repair is the action entry point (Phase 1 mechanics, Phase 3 hardening).
+// Given a tool that the detector flagged AutoFix, it looks up a fixer and,
+// if autofix is enabled and the fixer is non-destructive, runs it
+// probe-first with a bounded retry budget (maxRetries + exponential backoff).
+// Otherwise it returns the plan + advisory without mutating anything.
 func (e *Engine) Repair(tool string) RepairResult {
 	snap := e.SnapshotOf(tool)
 
@@ -166,6 +176,18 @@ func (e *Engine) Repair(tool string) RepairResult {
 		return out
 	}
 
+	// Phase 3 commit guard: a fix that rewrites checked-in source files is
+	// refused while the working tree has uncommitted changes, so a repair can
+	// never silently mix into (or destroy) in-progress work.
+	if fixer.MutatesCode {
+		if dirty, err := commitGuardCheck(); err == nil && dirty {
+			out.Message = "commit guard: working tree has uncommitted changes; commit/stash first (fix: " + fixer.Summary + ")"
+			out.Verdict = VerdictAdvisory
+			out.VerdictLabel = out.Verdict.String()
+			return out
+		}
+	}
+
 	// Probe before — if already healthy, nothing to do.
 	if err := fixer.Probe(); err == nil {
 		out.ProbeOK = true
@@ -185,23 +207,48 @@ func (e *Engine) Repair(tool string) RepairResult {
 	// actually attempts a fix, so Tried is set here (not before the gate).
 	out.Tried = true
 
-	if err := fixer.Fix(); err != nil {
-		out.Message = fmt.Sprintf("fix failed: %v", err)
-		out.Verdict = VerdictAdvisory
-		out.VerdictLabel = out.Verdict.String()
-		return out
+	// Bounded retry loop with exponential backoff (Phase 3): try Fix, then
+	// post-probe; if still unhealthy and attempts remain, back off and retry.
+	maxTries := e.MaxRetries()
+	if maxTries < 1 {
+		maxTries = 1
 	}
-	out.Fixed = true
+	var lastProbeErr error
+	for attempt := 1; attempt <= maxTries; attempt++ {
+		out.Attempts = attempt
+		if err := fixer.Fix(); err != nil {
+			lastProbeErr = err
+			if attempt < maxTries {
+				time.Sleep(e.backoff(attempt - 1))
+				continue
+			}
+			out.Message = fmt.Sprintf("fix failed after %d attempt(s): %v", attempt, err)
+			out.Verdict = VerdictAdvisory
+			out.VerdictLabel = out.Verdict.String()
+			return out
+		}
+		out.Fixed = true
 
-	// Probe after — the fix only counts if the tool is now healthy.
-	if err := fixer.Probe(); err != nil {
-		out.Message = "fix applied but post-probe still unhealthy: " + err.Error()
-		out.Verdict = VerdictAdvisory
-		out.VerdictLabel = out.Verdict.String()
+		// Probe after — the fix only counts if the tool is now healthy.
+		if err := fixer.Probe(); err != nil {
+			lastProbeErr = err
+			if attempt < maxTries {
+				time.Sleep(e.backoff(attempt - 1))
+				continue
+			}
+			out.Message = fmt.Sprintf("fix applied but post-probe still unhealthy after %d attempt(s): %v", attempt, err)
+			out.Verdict = VerdictAdvisory
+			out.VerdictLabel = out.Verdict.String()
+			return out
+		}
+		out.PostOK = true
+		out.Message = "fix applied and verified (post-probe ok)"
 		return out
 	}
-	out.PostOK = true
-	out.Message = "fix applied and verified (post-probe ok)"
+	_ = lastProbeErr
+	out.Message = "repair exhausted retry budget without a healthy post-probe"
+	out.Verdict = VerdictAdvisory
+	out.VerdictLabel = out.Verdict.String()
 	return out
 }
 

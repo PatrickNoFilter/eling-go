@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"eling/internal/agent"
+	"eling/internal/autorepair"
 	"eling/internal/cli"
 	"eling/internal/config"
 	"eling/internal/learnings"
@@ -215,6 +216,7 @@ func main() {
 			"export": true, "think": true, "verify": true,
 			"search-temporal": true, "version-history": true,
 			"versioned-update": true, "undo-version": true,
+			"autorepair": true, "tools-health": true, "health": true,
 		}
 		if cliSubcommands[cliCmd] {
 			// Handle CLI commands with minimal setup
@@ -227,6 +229,12 @@ func main() {
 				// Create a default config if none exists
 				cfg = config.DefaultConfig()
 			}
+			// Wire the autorepair opt-in gate from config (Phase 3): autofix
+			// stays OFF unless `autorepair.autofix: true`; detection +
+			// classification always run regardless.
+			autorepair.SetAutofixEnabled(cfg.Autorepair.Autofix)
+			autorepair.SetMaxRetries(cfg.Autorepair.MaxRetries)
+			autorepair.LoadQuarantineState()
 			if cli.RunCLI(cfg, Version, flag.Args()) {
 				os.Exit(0)
 			}
@@ -347,6 +355,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+
+	// Wire the autorepair opt-in gate from config (Phase 3): detection +
+	// classification always run; autofix only if the user opted in.
+	autorepair.SetAutofixEnabled(cfg.Autorepair.Autofix)
+	autorepair.SetMaxRetries(cfg.Autorepair.MaxRetries)
+	autorepair.LoadQuarantineState()
 
 	if *model != "" {
 		cfg.Agent.DefaultModel = *model

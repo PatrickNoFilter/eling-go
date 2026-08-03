@@ -4,6 +4,52 @@ Complete documentation for all 22+ built-in tools available in ELING's dynamic t
 
 ---
 
+## 🛠️ Auto-Repair & Tool Health (v0.4.0+)
+
+ELING's auto-repair subsystem watches tool failures, classifies breakage,
+and (opt-in) repairs idempotently. It runs in the background via the
+tool-registry hook — **detection + classification always run**; **autofix is
+opt-in** and never mutates anything unless enabled.
+
+**Config (`~/.eling/config.yaml`):**
+```yaml
+autorepair:
+  autofix: true      # opt-in: allow probe-first idempotent repairs (default false)
+  max_retries: 3     # per-repair attempt budget (default 3)
+```
+
+**CLI commands:**
+| Command | Description |
+|---------|-------------|
+| `eling autorepair` | Tool-health dashboard (verdicts + quarantine list) |
+| `eling tools-health` / `eling health` | Alias for the dashboard |
+| `eling autorepair reenable <tool>` | Re-enable a quarantined tool |
+| `eling autorepair autofix on\|off` | Toggle the autofix gate at runtime |
+
+**Pipeline (4 phases):**
+1. **Detect** — every tool failure is recorded (`RecordFailure`) with its error
+   string and latency; failures are counted over a rolling window.
+2. **Classify** — errors map to breakage classes: `missing_dep`, `config_drift`,
+   `transient`, `crash`, `contract_violation`, `logic_bug`, `unknown`.
+3. **Decide** — repeated identical failures (threshold 3) escalate to
+   `AUTOFIX`; crashes escalate to `QUARANTINE` (tool disabled + persisted to
+   `~/.eling/autorepair_state.json`); single/transient failures stay `RETRY`.
+4. **Act** — with autofix ON, non-destructive recipes run **probe-first**
+   (probe → fix → post-probe) with a bounded retry budget and **exponential
+   backoff** (base 500 ms, doubling, capped at 30 s). Destructive recipes and
+   code-mutation fixes while the git tree is dirty are refused (advisory).
+
+**Safety guarantees:**
+- Autofix is **OFF by default** — nothing is ever mutated without opt-in.
+- Every fix is gated by a pre/post probe; never runs on a healthy tool.
+- Destructive fixes surface as advisory, never auto-run.
+- **Commit guard (v0.4.0):** a fix that rewrites checked-in source files is
+  refused while the working tree has uncommitted changes.
+- Non-UTF-8 bytes in tool errors are sanitized before recording, so malformed
+  output never corrupts dashboards or persisted state.
+
+---
+
 ## ⏱ Timeout Strategy (v0.4.0)
 
 Every tool has a **hard wall-clock budget** — no tool can hang the agent forever:

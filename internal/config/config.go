@@ -19,8 +19,19 @@ type Config struct {
 	LSP     LSPConfig     `yaml:"lsp"`
 	Session SessionConfig `yaml:"session"`
 	Server  ServerConfig  `yaml:"server"`
-	Sandbox SandboxConfig `yaml:"sandbox"`
-	Hooks   HooksConfig   `yaml:"hooks"`
+	Sandbox    SandboxConfig    `yaml:"sandbox"`
+	Hooks      HooksConfig      `yaml:"hooks"`
+	Autorepair AutorepairConfig `yaml:"autorepair"`
+}
+
+// AutorepairConfig configures the tool auto-repair subsystem
+// (internal/autorepair). Detection + classification always run; autofix is
+// the opt-in gate that actually mutates the environment (probe-first,
+// idempotent repairs only). Default: autofix OFF — nothing is ever mutated
+// without explicit opt-in.
+type AutorepairConfig struct {
+	Autofix    bool `yaml:"autofix"`     // opt-in: allow probe-first idempotent repairs
+	MaxRetries int  `yaml:"max_retries"` // per-repair attempt budget (0 = default 3)
 }
 
 // AgentConfig configures the AI agent.
@@ -206,6 +217,10 @@ func DefaultConfig() *Config {
 		},
 		Hooks: HooksConfig{
 			Scripts: map[string][]string{}, // no user hooks by default
+		},
+		Autorepair: AutorepairConfig{
+			Autofix:    false, // opt-in: nothing is ever mutated by default
+			MaxRetries: 3,     // per-repair attempt budget
 		},
 	}
 }
