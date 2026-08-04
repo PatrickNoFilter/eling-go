@@ -53,7 +53,7 @@ var (
 	diffAddSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6E3A1"))              // green for added lines
 	diffDelSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F38BA8"))              // red for deleted lines
 	diffHdrSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#89B4FA"))              // blue for diff header
-	banSty       = lipgloss.NewStyle().Foreground(lipgloss.Color("#F5C2E7"))              // pink for scrolling banner
+	banSty       = lipgloss.NewStyle().Foreground(lipgloss.Color("#89B4FA"))              // blue for scrolling banner
 )
 
 // bannerText is the repeating message for the scrolling marquee.
