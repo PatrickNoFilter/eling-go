@@ -591,7 +591,7 @@ already ✅ above. **A6 ✅ (2026-08-03, lsp_rename tool + applyEdit safety net)
 | D4 | **Scheduled automations** (`eling automate add … --schedule`) | ⏳ | M | 🔥🔥 | `internal/hooks/hooks.go` (Phase 5 events, no scheduler); `internal/server/server.go` (daemon) |
 | D5 | **Evidence taxonomy per task type** | ⏳ | — | 🔥 | **folded into D2** (not standalone) |
 | D6 | **Per-tool permission profiles** (allow/ask/deny + project trust) | ⏳ | M | 🔥 | plan mode (`--plan`); sandbox `guard_mode`; no per-tool trust zones |
-| D7 | **Atomic commit discipline** (conventional commits + build/test gate) | ⏳ | XS | 🔥 | default system prompt: only the SEARCH RULE — no commit-workflow rule |
+| D7 | **Atomic commit discipline** (conventional commits + build/test gate) | ✅ 2026-08-06 | XS | 🔥 | default system prompt: only the SEARCH RULE — no commit-workflow rule |
 
 **Suggested sprint:** D1 ✅ → **D7 (XS quick win)** → D2 → D4 → D6 → D3 (quick wins first; D3 last — highest risk, gated).
 
@@ -771,11 +771,23 @@ There's no way to say "bash: ask, but read/write/edit: allow" per project.
 
 ---
 
-### D7 — Atomic commit discipline (conventional commits + build/test gate)  `[candidate — quick win, XS]`
+### D7 — Atomic commit discipline (conventional commits + build/test gate)  `[IMPLEMENTED 2026-08-06 25a2050]`
 
 > ⚠️ **Outlier:** source is a **Claude Code skill**, not DeepCode —
 > [bring-shrubbery/atomic-commits](https://github.com/bring-shrubbery/atomic-commits) (MIT, 4
 > commits). Kept in Part III as a quick-win sibling candidate so all adoption items live in one list.
+
+**Status (25a2050, 2026-08-06):** Added a 5-line `ATOMIC COMMIT DISCIPLINE` paragraph to the
+default system prompt in `internal/config/config.go` (next to the SEARCH RULE): plan atomic steps
+→ implement ONE logical change → `go build` + `go vet` + `go test` → commit with a conventional
+message → repeat; never batch unrelated changes, never leave the tree red. New
+`internal/config/config_test.go` asserts the default prompt carries every fragment of the rule and
+that the SEARCH RULE survived the edit. Prompt-only, no new gates/deps. `go vet` + full `go test
+./...` green.
+
+**Its own discipline applied to the commit:** `feat(prompt): D7 atomic commit discipline in
+default system prompt` was itself a single atomic change, built/vetted/tested, then committed with
+a conventional message.
 
 **What it does:** enforces the commit workflow as a first-class instruction:
 1. Plan work as a **numbered list of atomic steps** before coding.
