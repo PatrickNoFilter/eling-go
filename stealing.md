@@ -591,8 +591,9 @@ already ✅ above. **A6 ✅ (2026-08-03, lsp_rename tool + applyEdit safety net)
 | D4 | **Scheduled automations** (`eling automate add … --schedule`) | ⏳ | M | 🔥🔥 | `internal/hooks/hooks.go` (Phase 5 events, no scheduler); `internal/server/server.go` (daemon) |
 | D5 | **Evidence taxonomy per task type** | ⏳ | — | 🔥 | **folded into D2** (not standalone) |
 | D6 | **Per-tool permission profiles** (allow/ask/deny + project trust) | ⏳ | M | 🔥 | plan mode (`--plan`); sandbox `guard_mode`; no per-tool trust zones |
+| D7 | **Atomic commit discipline** (conventional commits + build/test gate) | ⏳ | XS | 🔥 | default system prompt: only the SEARCH RULE — no commit-workflow rule |
 
-**Suggested sprint:** D1 → D2 → D4 → D6 → D3 (quick wins first; D3 last — highest risk, gated).
+**Suggested sprint:** D1 ✅ → **D7 (XS quick win)** → D2 → D4 → D6 → D3 (quick wins first; D3 last — highest risk, gated).
 
 ---
 
@@ -770,6 +771,46 @@ There's no way to say "bash: ask, but read/write/edit: allow" per project.
 
 ---
 
+### D7 — Atomic commit discipline (conventional commits + build/test gate)  `[candidate — quick win, XS]`
+
+> ⚠️ **Outlier:** source is a **Claude Code skill**, not DeepCode —
+> [bring-shrubbery/atomic-commits](https://github.com/bring-shrubbery/atomic-commits) (MIT, 4
+> commits). Kept in Part III as a quick-win sibling candidate so all adoption items live in one list.
+
+**What it does:** enforces the commit workflow as a first-class instruction:
+1. Plan work as a **numbered list of atomic steps** before coding.
+2. Implement **one logical change** at a time.
+3. **Commit immediately after each change** with a conventional commit message (`feat:`, `fix:`,
+   `docs:`, `chore:`, …).
+4. **Verify the codebase builds and tests pass after every commit.**
+
+**Why we want it:** ELING already *practices* this — the heist golden rule ("one phase per commit;
+tests must pass after each phase") and the git log (conventional-style atomic commits like
+`docs(deepcode): add Part III`, `chore(backup): limit backup rotation`) prove the habit. But the
+discipline lives in the plan doc + session habits, not in the runtime: the default system prompt
+contains only the SEARCH RULE. Nothing tells the agent to apply atomic commits on **arbitrary**
+projects, so the habit silently degrades outside the heist workflow.
+
+**Plan:**
+1. Add a short **"Atomic commit discipline"** paragraph to the default system prompt in
+   `internal/config/config.go` (next to the SEARCH RULE), ~5 lines, reimplemented in our own words.
+2. Order of operations in the rule: plan atomic steps → implement one change → `go build` + `go vet`
+   + `go test` → commit with a conventional message → repeat.
+3. No new runtime gates, no new deps — instruction text only (matches the "reimplement, never copy"
+   rule; the skill's substance is a 4-rule discipline).
+
+**Files touched:** `internal/config/config.go` (default prompt) + `internal/config/config_test.go`
+(assert default prompt contains the rule).
+
+**Acceptance:**
+- [ ] Default prompt dump shows the rule (visible via `eling config`)
+- [ ] Fresh install behavior unchanged beyond instruction text (no new gates/deps)
+- [ ] `go vet` + `go test` green after the change
+
+**Effort:** XS (≤ 0.5 day) · **Risk:** low (prompt-only; additive)
+
+---
+
 ## 🟢 Verification Audit (2026-08-04) — race / double-function / effectiveness
 
 Audited every candidate against the real codebase (`/root/eling`). Result per item:
@@ -783,6 +824,7 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
 | D4 | 🟢 scheduler single-goroutine ticker + overlap guard | 🟢 hooks (Phase 5) are event-driven — no scheduler exists | 🟢 | 🟢 add overlap guard + logs |
 | D5 | — | — | — | 🔴 reframe: **fold into D2** |
 | D6 | 🟢 additive check before dispatch | 🟢 no per-tool permission infra; plan mode + guard_mode are different layers | 🟢 | 🟢 default `ask`/`allow` preserves behavior |
+| D7 | 🟢 prompt-only text; no new state/goroutines | 🟢 no existing commit-workflow rule in `config.go`; distinct from D2 (runtime verify loop) | 🟢 formalizes a habit already practiced | 🟢 quick win (XS); prompt-only, no deps |
 
 ## 🔧 Amendments locked in (must be applied when implementing)
 
