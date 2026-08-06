@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -31,14 +32,59 @@ func init() {
 	})
 }
 
+// resolveProjectRoot determines the directory to back up.
+// Priority: explicit project_dir arg > ELING_PROJECT_DIR env > walk up from
+// CWD for a go.mod or .git marker. Returns an error when no project root can
+// be determined, so we never zip an entire home directory by accident.
+func resolveProjectRoot(args map[string]interface{}) (string, error) {
+	if d, ok := args["project_dir"].(string); ok && d != "" {
+		return d, nil
+	}
+	if d := os.Getenv("ELING_PROJECT_DIR"); d != "" {
+		return d, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("get cwd: %w", err)
+	}
+	dir := cwd
+	for {
+		if isProjectRoot(dir) {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break // reached filesystem root
+		}
+		dir = parent
+	}
+	return "", fmt.Errorf(
+		"cannot determine project root: no go.mod or .git found from %q (pass project_dir explicitly)", cwd)
+}
+
+// isProjectRoot reports whether dir contains a go.mod or .git marker.
+func isProjectRoot(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+		return true
+	}
+	if fi, err := os.Stat(filepath.Join(dir, ".git")); err == nil && fi.IsDir() {
+		return true
+	}
+	return false
+}
+
 // backupExecute creates a timestamped ZIP backup of the project.
 // It excludes: compiled binaries (eling, eling_new, eling_rebuild),
 // any existing backup zips, and common cache/vendor directories.
 func backupExecute(args map[string]interface{}) (interface{}, error) {
-	// Determine project root: default to current directory
-	projectDir := "."
-	if d, ok := args["project_dir"].(string); ok && d != "" {
-		projectDir = d
+	// Determine project root. Never default to the raw CWD: the agent
+	// process may run from a home directory (e.g. /root) whose tree contains
+	// hundreds of MB of unrelated data (archives, caches, other projects),
+	// which makes zip crawl for hours. Resolve the actual project root by
+	// walking up for go.mod/.git, and error out if none is found.
+	projectDir, err := resolveProjectRoot(args)
+	if err != nil {
+		return nil, err
 	}
 
 	// Get absolute path for better messages
@@ -67,7 +113,10 @@ func backupExecute(args map[string]interface{}) (interface{}, error) {
 		"-x", "eling",
 		"-x", "eling_new",
 		"-x", "eling_rebuild",
+		"-x", "eling-linux-*",
 		"-x", "*.zip",
+		"-x", "*.tar.gz",
+		"-x", "*.tgz",
 		"-x", "*.bak.*",
 		"-x", ".git/*",
 		"-x", "node_modules/*",
@@ -80,6 +129,15 @@ func backupExecute(args map[string]interface{}) (interface{}, error) {
 	}
 	cmd := exec.Command("zip", zipArgs...)
 	cmd.Dir = absDir
+	// Start in its own process group so killProcessGroup (used by
+	// KillRunningTools on timeout) can SIGKILL it even mid-crawl.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Track the subprocess so the registry's timeout guard (KillRunningTools)
+	// can SIGKILL it on expiry. Without this, a zip crawling a huge tree
+	// orphans and keeps running for hours after the tool call times out.
+	trackCmd(cmd)
+	defer untrackCmd(cmd)
 
 	stdout := newLimitedBuffer(maxBashOutputBytes)
 	stderr := newLimitedBuffer(maxBashOutputBytes)

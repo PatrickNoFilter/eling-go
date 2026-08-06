@@ -213,3 +213,71 @@ func TestWriteExecuteSkipsIdenticalContent(t *testing.T) {
 		t.Fatalf("unexpected backups created: %v", matches)
 	}
 }
+
+func TestResolveProjectRootFromSubdir(t *testing.T) {
+	// Simulate a project with a go.mod marker, then resolve from a nested dir.
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "a", "b")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ELING_PROJECT_DIR", "")
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+	if err := os.Chdir(sub); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveProjectRoot(map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("resolveProjectRoot from subdir: %v", err)
+	}
+	if got != root {
+		t.Fatalf("expected project root %q, got %q", root, got)
+	}
+}
+
+func TestResolveProjectRootExplicitArgWins(t *testing.T) {
+	explicit := t.TempDir()
+	got, err := resolveProjectRoot(map[string]interface{}{"project_dir": explicit})
+	if err != nil {
+		t.Fatalf("resolveProjectRoot with explicit arg: %v", err)
+	}
+	if got != explicit {
+		t.Fatalf("expected explicit dir %q, got %q", explicit, got)
+	}
+}
+
+func TestResolveProjectRootNoMarkerErrors(t *testing.T) {
+	dir := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ELING_PROJECT_DIR", "")
+	if _, err := resolveProjectRoot(map[string]interface{}{}); err == nil {
+		t.Fatal("expected error when no go.mod/.git marker is found")
+	}
+}
+
+func TestIsProjectRoot(t *testing.T) {
+	root := t.TempDir()
+	if isProjectRoot(root) {
+		t.Fatal("temp dir without markers should not be a project root")
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !isProjectRoot(root) {
+		t.Fatal("dir with go.mod should be a project root")
+	}
+}
