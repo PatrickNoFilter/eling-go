@@ -25,12 +25,13 @@ import (
 	"eling/internal/config"
 	"eling/internal/hooks"
 	"eling/internal/layers"
-	"eling/internal/lsp"
 	"eling/internal/learnings"
+	"eling/internal/lsp"
 	"eling/internal/mcp"
 	"eling/internal/provider"
 	"eling/internal/session"
 	"eling/internal/tools"
+	"eling/internal/verify"
 )
 
 // LearnedSkill is a skill the agent has learned from experience.
@@ -176,8 +177,16 @@ type Agent struct {
 	// Provider call metrics (A5 stats dashboard, oh-my-pi steal A5): per
 	// provider calls/failures/latency recorded around every ChatStream
 	// attempt in chatStreamWithRetry. Read by GetStats.
-	providerStatsMu   sync.RWMutex
-	providerStats     map[string]*ProviderStat
+	providerStatsMu sync.RWMutex
+	providerStats   map[string]*ProviderStat
+
+	// verifyCtl (D2, DeepCode heist): the verify→repair loop. After the agent
+	// edits code files it runs task-appropriate verification evidence (Go →
+	// `go test ./...`; other languages → LSP diagnostics) and a FAILED
+	// verification is never reported as success — the failure feeds the next
+	// repair round, bounded by verify.max_rounds + verify.timeout_sec. Per-turn
+	// state is Reset() at the start of every Ask/AskStream.
+	verifyCtl *verify.Verifier
 }
 
 // ProviderStat tracks per-provider call metrics for the stats dashboard (A5).
@@ -193,6 +202,18 @@ type autoTestOutcome struct {
 	Passed    bool      // true = all tests passed
 	FailText  string    // failure summary when !Passed
 	Timestamp time.Time // when the run happened
+}
+
+// verifyToolCalls reduces a round's provider tool calls to the minimal
+// verify.ToolCall image (name + raw JSON args) the verifier needs to detect
+// edits and select evidence. Keeps internal/agent decoupled from the verify
+// package's ToolCall type while passing through only what it consumes.
+func verifyToolCalls(tcs []provider.ToolCall) []verify.ToolCall {
+	out := make([]verify.ToolCall, 0, len(tcs))
+	for _, tc := range tcs {
+		out = append(out, verify.ToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
+	}
+	return out
 }
 
 // New creates a new Agent with all subsystems initialized.
@@ -317,6 +338,31 @@ func New(cfg *config.Config) (*Agent, error) {
 			log.Printf("Project rules loaded from %s (%d chars)", file, len(content))
 		}
 	}
+
+	// D2 (DeepCode heist): the verify→repair loop. Wire the verifier's static
+	// evidence to the Phase-3 LSP language servers so non-Go files (python /
+	// typescript) get diagnostics via the same gopls-family stack. Go edits are
+	// verified with a real `go test ./...` (or LSP when no go.mod is found).
+	a.verifyCtl = verify.New(verify.Config{
+		Enabled:    cfg.Verify.Enabled,
+		MaxRounds:  cfg.Verify.MaxRounds,
+		TimeoutSec: cfg.Verify.TimeoutSec,
+		Evidence:   cfg.Verify.Evidence,
+	}, func(path string) []string {
+		if !lsp.Supports(path) {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		diags := lsp.Diagnostics(path, string(b))
+		out := make([]string, 0, len(diags))
+		for _, d := range diags {
+			out = append(out, d.SeverityText()+": "+d.Message)
+		}
+		return out
+	})
 
 	return a, nil
 }
@@ -450,6 +496,20 @@ func (a *Agent) draftPlan(ctx context.Context, prov *provider.Provider, messages
 func (a *Agent) Ask(ctx context.Context, prompt string, onToolCall ...func(ToolCallEvent)) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	// D2 (DeepCode heist): per-turn verify→repair state. Reset every turn so
+	// evidence never leaks across turns. Plan mode is an explicit user gate,
+	// so it opts out of auto-verification for this turn; the next non-plan
+	// turn re-enables it (Enable() is a no-op when verification was disabled
+	// at build time by --no-verify / verify.enabled: false).
+	if a.verifyCtl != nil {
+		if a.PlanEnabled.Load() {
+			a.verifyCtl.Disable()
+		} else {
+			a.verifyCtl.Enable()
+		}
+		a.verifyCtl.Reset()
 	}
 
 	// Plan mode: clear any stale plan from a previous turn so buildMessages
@@ -787,6 +847,12 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 			}
 			a.lastToolRoundCount.Store(int64(round))
 			a.lastToolCallCount.Store(int64(toolSeq))
+			// D2: append the final Evidence block (command, exit, status) so the
+			// answer honestly reports what was verified — PASS or a STILL FAILING
+			// warning, never a false success.
+			if ev := a.verifyCtl.Final(toolCtx); ev != "" {
+				resp.Content += ev
+			}
 			return resp.Content, totalTokens, nil
 		}
 
@@ -919,6 +985,20 @@ func (a *Agent) runToolLoop(ctx context.Context, prov *provider.Provider, messag
 					Content: "[Auto-test result — system-generated, not a user message]\n" + testFail,
 				})
 			}
+		}
+
+		// D2 (DeepCode heist): evidence-driven verify→repair loop gate. After
+		// an editing round, run task-appropriate verification evidence (Go →
+		// `go test ./...`, other languages → LSP diagnostics). A FAILED
+		// verification is NEVER reported as success — the failure is injected
+		// as the next user message so the model repairs it instead of declaring
+		// done. Bounded by the dedicated verify.max_rounds + verify.timeout_sec
+		// fields and honors toolCtx cancellation (never the global maxRounds).
+		if repair := a.verifyCtl.Round(toolCtx, verifyToolCalls(resp.ToolCalls)); repair != "" {
+			messages = append(messages, provider.Message{
+				Role:    "user",
+				Content: repair,
+			})
 		}
 	}
 
@@ -1296,6 +1376,16 @@ func (a *Agent) AskStream(ctx context.Context, prompt string, onChunk func(strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// D2 (DeepCode heist): per-turn verify→repair state reset + plan-mode
+	// opt-out — same discipline as Ask() so both entry points behave alike.
+	if a.verifyCtl != nil {
+		if a.PlanEnabled.Load() {
+			a.verifyCtl.Disable()
+		} else {
+			a.verifyCtl.Enable()
+		}
+		a.verifyCtl.Reset()
+	}
 	a.mu.RLock()
 	contextPrompt := a.buildContext(prompt)
 	messages := a.buildMessages(contextPrompt)
@@ -1667,10 +1757,26 @@ func (a *Agent) runStreamToolLoop(ctx context.Context, prov *provider.Provider, 
 				})
 			}
 		}
+
+		// D2 (DeepCode heist): evidence-driven verify→repair loop gate — same
+		// discipline as runToolLoop: inject failing evidence as the next user
+		// message so the model repairs it, bounded & time-boxed.
+		if repair := a.verifyCtl.Round(toolCtx, verifyToolCalls(toolCalls)); repair != "" {
+			messages = append(messages, provider.Message{
+				Role:    "user",
+				Content: repair,
+			})
+		}
 	}
 
 	if !gotFinalAnswer {
 		return "", totalTokens, fmt.Errorf("max tool rounds reached without a final answer")
+	}
+
+	// D2: append the final Evidence block before returning the streamed
+	// answer so it honestly reports what was verified.
+	if ev := a.verifyCtl.Final(toolCtx); ev != "" {
+		fullResponse += ev
 	}
 
 	a.lastToolRoundCount.Store(int64(round))

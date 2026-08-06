@@ -12,16 +12,29 @@ import (
 
 // Config represents the full ELING configuration.
 type Config struct {
-	Agent   AgentConfig   `yaml:"agent"`
-	UI      UIConfig      `yaml:"ui"`
-	Memory  MemoryConfig  `yaml:"memory"`
-	MCP     MCPConfig     `yaml:"mcp"`
-	LSP     LSPConfig     `yaml:"lsp"`
-	Session SessionConfig `yaml:"session"`
-	Server  ServerConfig  `yaml:"server"`
+	Agent      AgentConfig      `yaml:"agent"`
+	UI         UIConfig         `yaml:"ui"`
+	Memory     MemoryConfig     `yaml:"memory"`
+	MCP        MCPConfig        `yaml:"mcp"`
+	LSP        LSPConfig        `yaml:"lsp"`
+	Session    SessionConfig    `yaml:"session"`
+	Server     ServerConfig     `yaml:"server"`
 	Sandbox    SandboxConfig    `yaml:"sandbox"`
 	Hooks      HooksConfig      `yaml:"hooks"`
 	Autorepair AutorepairConfig `yaml:"autorepair"`
+	Verify     VerifyConfig     `yaml:"verify"`
+}
+
+// VerifyConfig configures the D2 verify→repair loop (DeepCode heist). When
+// enabled (default), after the agent edits code files the loop runs appropriate
+// verification evidence (Go → `go test ./...`, other languages → LSP
+// diagnostics) and a FAILED verification is never reported as success — the
+// failure feeds the next repair round, bounded by MaxRounds and TimeoutSec.
+type VerifyConfig struct {
+	Enabled    bool   `yaml:"enabled"`     // default true
+	MaxRounds  int    `yaml:"max_rounds"`  // repair iterations (0 = default 2)
+	TimeoutSec int    `yaml:"timeout_sec"` // per-run evidence timeout (0 = default 60)
+	Evidence   string `yaml:"evidence"`    // "auto" (per-task evidence taxonomy, D5 folded in)
 }
 
 // AutorepairConfig configures the tool auto-repair subsystem
@@ -44,8 +57,8 @@ type AgentConfig struct {
 	MaxTurnDuration        int              `yaml:"max_turn_duration"`         // wall-clock timeout per turn (seconds)
 	MaxTurnDurationRetries int              `yaml:"max_turn_duration_retries"` // max retries on timeout (self-adaptive)
 	AutoTest               bool             `yaml:"auto_test"`                 // from Python: auto-run go test on touched test files
-	AutoTestTimeoutSec     int              `yaml:"auto_test_timeout_sec"`      // per-run go test timeout (0 = default 45s)
-	AutoTestCooldownSec    int              `yaml:"auto_test_cooldown_sec"`     // min seconds between runs (0 = default 10s)
+	AutoTestTimeoutSec     int              `yaml:"auto_test_timeout_sec"`     // per-run go test timeout (0 = default 45s)
+	AutoTestCooldownSec    int              `yaml:"auto_test_cooldown_sec"`    // min seconds between runs (0 = default 10s)
 	LearnFromExchange      bool             `yaml:"learn_from_exchange"`       // from Python: LLM-based skill learning
 	SaveConversation       bool             `yaml:"save_conversation"`         // save every conversation turn to semantic index
 	PlanMode               bool             `yaml:"plan_mode"`                 // plan mode: draft a plan + get approval before executing tools
@@ -126,11 +139,11 @@ type ServerConfig struct {
 // environment and a destructive-command guard. Real-tree operations require
 // the explicit `allow_host: true` opt-in arg on the bash tool.
 type SandboxConfig struct {
-	Enabled   bool   `yaml:"enabled"`             // default true in Termux root env
-	Root      string `yaml:"root"`                // sandbox root dir, e.g. ~/.eling/sandbox
-	MaxOutput int    `yaml:"max_output"`          // max captured bytes (0 = default 512 KiB)
-	TimeoutSec int   `yaml:"timeout_sec"`         // default bash timeout when unset (0 = default 30s)
-	GuardMode string `yaml:"guard_mode"`          // "block" (default) or "warn" for destructive commands
+	Enabled    bool   `yaml:"enabled"`     // default true in Termux root env
+	Root       string `yaml:"root"`        // sandbox root dir, e.g. ~/.eling/sandbox
+	MaxOutput  int    `yaml:"max_output"`  // max captured bytes (0 = default 512 KiB)
+	TimeoutSec int    `yaml:"timeout_sec"` // default bash timeout when unset (0 = default 30s)
+	GuardMode  string `yaml:"guard_mode"`  // "block" (default) or "warn" for destructive commands
 }
 
 // HooksConfig configures user-defined shell-script hooks (Phase 5). Each key
@@ -156,7 +169,7 @@ func DefaultConfig() *Config {
 			MaxTurnDurationRetries: 2, // retry up to 2 times on timeout
 			AutoTest:               true,
 			AutoTestTimeoutSec:     180, // per-run go test timeout; slow ARM cold builds measured at ~95s
-			AutoTestCooldownSec:    10, // min seconds between runs (0 = default 10s)
+			AutoTestCooldownSec:    10,  // min seconds between runs (0 = default 10s)
 			LearnFromExchange:      true,
 			SaveConversation:       true,
 			ProjectRules:           true,
@@ -215,8 +228,8 @@ func DefaultConfig() *Config {
 		Sandbox: SandboxConfig{
 			Enabled:    true,
 			Root:       filepath.Join(homeDir, ".eling", "sandbox"),
-			MaxOutput:  0,   // 0 = default 512 KiB
-			TimeoutSec: 0,   // 0 = default 30s
+			MaxOutput:  0, // 0 = default 512 KiB
+			TimeoutSec: 0, // 0 = default 30s
 			GuardMode:  "block",
 		},
 		Hooks: HooksConfig{
@@ -225,6 +238,12 @@ func DefaultConfig() *Config {
 		Autorepair: AutorepairConfig{
 			Autofix:    false, // opt-in: nothing is ever mutated by default
 			MaxRetries: 3,     // per-repair attempt budget
+		},
+		Verify: VerifyConfig{
+			Enabled:    true, // verify→repair loop ON by default (D2)
+			MaxRounds:  2,    // repair iterations before honest-failure reporting
+			TimeoutSec: 60,   // per-run evidence timeout
+			Evidence:   "auto",
 		},
 	}
 }

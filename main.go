@@ -192,6 +192,7 @@ func main() {
 	markdownifyAddr := flag.String("markdownify-addr", ":8080", "Address for markdownify HTTP server")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	planMode := flag.Bool("plan", false, "Plan mode: draft a plan and require approval before executing tools")
+	noVerify := flag.Bool("no-verify", false, "Disable the verify→repair auto-verification loop (same as `verify.enabled: false`)")
 	flag.Parse()
 
 	if *showVersion {
@@ -211,7 +212,7 @@ func main() {
 			"rollback": true, "link-stats": true, "linked-facts": true,
 			"evolve": true, "stats": true, "learnings": true, "config": true, "init-rules": true,
 			"rules": true,
-			"mcp": true, "continuum": true, "blackbox": true, "markdownify": true,
+			"mcp":   true, "continuum": true, "blackbox": true, "markdownify": true,
 			"sync": true, "setup": true, "install-opencode": true, "install-zero": true,
 			"install-termux": true, "help": true,
 			"export": true, "think": true, "verify": true,
@@ -391,6 +392,14 @@ func main() {
 	}
 	for i := range cfg.Agent.Providers {
 		cfg.Agent.Providers[i].APIKey = key
+	}
+
+	// D2 (DeepCode heist): --no-verify opts out of the evidence-driven
+	// verify→repair loop (equivalent to `verify.enabled: false` in config).
+	// Applied BEFORE agent.New so the verifier is commissioned disabled from
+	// birth — the per-turn plan-mode logic can never resurrect it.
+	if *noVerify {
+		cfg.Verify.Enabled = false
 	}
 
 	ag, err := agent.New(cfg)
