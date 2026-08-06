@@ -8,6 +8,7 @@
 > **Part I** (below) = Qwen Code heist (Phases 1–5, all ✅ DONE).
 > **Part II** (appended 2026-08-02) = oh-my-pi adoption list — **6 ✅ implemented (A1, A2, A5, A6, A7, A10),
 > 1 ⏳ deferred (A3)**. Re-audited 2026-08-02, A6 landed 2026-08-03.
+> **Part III** (appended 2026-08-04) = DeepCode heist — D1–D6 candidates; sprint order D1 → D2 → D4 → D6 → D3.
 >
 > **Rule:** We *reimplement ideas*, never copy code. Apache-2.0 permits derivative work, but
 > ELING's Go architecture is different enough that clean-room reimplementation is the right call.
@@ -550,3 +551,286 @@ already ✅ above. **A6 ✅ (2026-08-03, lsp_rename tool + applyEdit safety net)
     `packages/mnemopi` + `docs/mnemosyne-memory-backend.md` (A10),
     `packages/natives` + `crates/pi-natives` (perf core — read for ideas only)
 - omp docs map: `docs/` in `/root/oh-my-pi` (~90 files, 1:1 per subsystem)
+
+---
+---
+
+# 🧠 PART III — DeepCode Adoption List (candidates, not yet implemented)
+
+> **Source:** [HKUDS/DeepCode](https://github.com/HKUDS/DeepCode) (16.2k ⭐, "Open Agentic Coding" —
+> ideas → production-ready code; HKU Data Science lab, same group as LightRAG). Local clone:
+> `/root/deepcode` (depth-1, clone before Phase D2 study).
+>
+> **What DeepCode does better than us:**
+> 1. **Evidence-driven completion** — picks the *appropriate* verification for the task (tests /
+>    build / static diagnostics / diff), runs it, and **a failed verification is never reported as
+>    success** — the failure feeds the next repair iteration.
+> 2. **Multi-agent parallelism done safely** — focused agents work in **isolated git worktrees**
+>    with explicit conflict surfacing (never silent clobber).
+> 3. **Project rules ingestion** — reads the repo's own `AGENTS.md`/`DEEPCODE.md`/`CLAUDE.md` into
+>    its loop so engineering rules steer every turn.
+> 4. **Scheduled automations** — saved workflows run on cron (regression scans, test-repair, docs).
+> 5. **Per-tool permission profiles** — allow/ask/deny per tool + per-project trust.
+>
+> **Audited 2026-08-04 against `/root/eling`:** our worktree infra (Phase 1), event hooks (Phase 5),
+> LSP diagnostics (Phase 3), plan mode (Phase 2), and per-turn learnings injection (A10) are the
+> foundations DeepCode builds on — **we're ahead on infra, behind on the verify→repair loop and
+> rules self-ingestion**.
+>
+> **Rule:** same as Parts I & II — reimplement ideas, never copy code. ELING is Go single-binary by
+> design; DeepCode's search/shell/static surfaces are **already equivalent** via ugrep 7.5.0 +
+> sandbox + LSP.
+
+## 📊 Ranked Adoption List (Value/Effort)
+
+| # | Adoption | Status | Effort | Value | ELING anchor (today) |
+|---|----------|--------|--------|-------|----------------------|
+| D1 | **Project rules ingestion** (AGENTS.md/CLAUDE.md/DEEPCODE.md → system prompt) | ⏳ | S | 🔥🔥🔥 | `internal/layers/rules.go` (writes/detects only — no self-ingest); `buildMessages()` + learnings injection (A10) |
+| D2 | **Verify→Repair loop** (evidence-driven completion / Loop Engineering) | ⏳ | S–M | 🔥🔥🔥 | `agent.go:3088 autoTest()` (Go-only, fire-and-forget); `internal/autorepair/state.go` (maxRetries/backoff); `internal/layers/verify_on_stop.go` (nudge only) |
+| D3 | **Multi-agent parallelism in isolated worktrees** (conflict-surfaced) | ⏳ | M | 🔥🔥 | `internal/tools/worktree.go` (Phase 1 infra exists); SubAgents deferred since Part I |
+| D4 | **Scheduled automations** (`eling automate add … --schedule`) | ⏳ | M | 🔥🔥 | `internal/hooks/hooks.go` (Phase 5 events, no scheduler); `internal/server/server.go` (daemon) |
+| D5 | **Evidence taxonomy per task type** | ⏳ | — | 🔥 | **folded into D2** (not standalone) |
+| D6 | **Per-tool permission profiles** (allow/ask/deny + project trust) | ⏳ | M | 🔥 | plan mode (`--plan`); sandbox `guard_mode`; no per-tool trust zones |
+
+**Suggested sprint:** D1 → D2 → D4 → D6 → D3 (quick wins first; D3 last — highest risk, gated).
+
+---
+
+### D1 — Project rules ingestion (AGENTS.md/CLAUDE.md/DEEPCODE.md → system prompt)  `[candidate — Phase 1, S]`
+
+**What DeepCode does:** reads the project's own `AGENTS.md`/`DEEPCODE.md` (and Claude-style skill
+rules dirs) into the agent loop, so repo-specific engineering rules steer every turn.
+
+**Why we want it:** ELING's `internal/layers/rules.go` (exports `DetectAgents`, `WriteRules`) *writes* AGENTS.md for other agents and
+*detects* them for rule generation, but **never reads a project's own `AGENTS.md`/`CLAUDE.md`/
+`.cursor/rules` into its own context**. A repo with rules gets ignored — the agent re-learns
+conventions by trial.
+
+**Plan:**
+1. `internal/layers/rules_ingest.go` (new, package `layers` — agent already imports it, so no
+   new package / no import cycle): at `Agent.New()` / session start, probe cwd + `--dir` for
+   `AGENTS.md`, `DEEPCODE.md`, `CLAUDE.md`, `.cursor/rules/*.mdc` (first match wins, in that order).
+2. **Read-only** ingestion: parse, cap at ~4 KiB / 40 lines (protect small local-model budgets),
+   normalize into a `[Project rules — apply when relevant]` block.
+3. Inject through the **same `buildMessages()` mechanism A10 uses for learnings** (per-turn system
+   message, capped) — no new plumbing in the loop.
+4. `eling rules show` CLI + `eling rules --refresh` reload (extend existing `rules.go` surface).
+
+**Files touched:** `internal/layers/rules_ingest.go` (new, package `layers`),
+`internal/layers/rules.go` (extend `DetectAgents`/`WriteRules` surface for `eling rules show` /
+`--refresh`), `internal/agent/agent.go` (boot load + inject), `internal/cli/cli.go`,
+`internal/layers/rules_ingest_test.go` (new).
+
+**Acceptance:**
+- [ ] Repo with `AGENTS.md` → rules appear in per-turn system messages (test asserts)
+- [ ] Missing rules file → silent skip, no crash
+- [ ] `./rebuild.sh` green; full suite passes
+
+**Effort:** S (half day) · **Risk:** very low
+
+---
+
+### D2 — Verify→Repair loop (evidence-driven completion / Loop Engineering)  `[candidate — Phase 2, S–M]`
+
+**What DeepCode does:** the agent picks *appropriate verification evidence* for the task (test
+output, build result, static diagnostics, diff/artifact), runs it, and **a failed verification is
+never reported as success** — the failure becomes the input to the next repair iteration until
+green (or honestly reported as failing).
+
+**Why we want it:** the #1 waste in coding agents is declaring "done" after edits without checking.
+ELING today: `autoTest()` (`agent.go:3088`) runs `go test` but **Go-only and fire-and-forget**
+(appends output, no loop); `internal/autorepair/` repairs *broken tools*, not task completion;
+`internal/layers/verify_on_stop.go` is a nudge for *other* agents, not a self loop.
+
+**Plan:**
+1. **Evidence selector** (`internal/verify/evidence.go`): pick by task — Go edit → `go test ./...`
+   (fallback `go build ./...`); edit w/o tests → `go vet`/LSP diagnostics (reuse `internal/lsp`);
+   docs → no verify, just diff. *(This is the D5 taxonomy — built here, not separately.)*
+2. **Loop gate** (`internal/verify/loop.go`): after tool-loop edits, if `verify.enabled` (default
+   on; plan-mode or `--no-verify` opts out), run evidence, parse pass/fail, and on failure inject
+   `[verification failed — repair within N rounds]`, reusing `internal/autorepair/state.go`
+   maxRetries/backoff (default **2 rounds**), each run time-boxed.
+3. **Honest reporting**: final answer includes an `Evidence:` block (command, exit, summary).
+   Never claim success with failing evidence.
+4. Config: `verify: { enabled: true, max_rounds: 2, timeout_sec: 60, evidence: auto }`.
+
+**Files touched:** `internal/verify/evidence.go` (new), `internal/verify/loop.go` (new),
+`internal/agent/agent.go` (wire gate into both tool loops), `internal/config/config.go`,
+`internal/verify/verify_test.go` (new).
+
+**Acceptance:**
+- [ ] Introduce a Go syntax error via edit → next turn contains `[verification failed]` and the agent repairs
+- [ ] Clean edit → `Evidence: go test … PASS` reported with the answer
+- [ ] `--no-verify` / plan-mode skip → no evidence block, no delay
+- [ ] `go test -race ./internal/verify/...` green; full suite passes
+
+**Effort:** S–M (1–2 days) · **Risk:** low–medium (bounded by max_rounds + timeout)
+
+---
+
+### D3 — Multi-agent parallelism in isolated worktrees  `[candidate — Phase 3, M — gated, default off]`
+
+**What DeepCode does:** splits work into focused agents (investigate vs. implement vs. review)
+running in **isolated git worktrees**; changes never clobber each other; conflicts are surfaced
+explicitly, never silently merged.
+
+**Why we want it:** Part I explicitly deferred SubAgents (nested API budget, race conditions,
+free-tier rate limits). DeepCode's answer to "races" is exactly the worktree infra we already
+shipped in Phase 1 — so this is the **v2 un-defer**, now de-risked by isolation we already own.
+
+**Plan:**
+1. **Orchestrator** (`internal/agents/orchestrator.go`): bounded **2-agent** split —
+   `investigator` (read-only: search/read/plan in a read-only worktree) → `implementer` (edits in
+   its own worktree). Max 2 concurrent; per-agent token budget cap.
+2. **Isolation**: each subagent gets its own `worktree_create`; merge only via `worktree_merge`
+   with an explicit `--review` diff report; **never silent merge**.
+3. **Conflict surfacing**: if worktrees touch the same file, the merge produces a diff report to
+   the main agent instead of auto-resolving.
+4. Config: `agents.enabled: false` (default **off** until battle-tested), `agents.max: 2`;
+   `go test -race ./internal/agents/...` in the CI gate.
+
+**Files touched:** `internal/agents/orchestrator.go` (new), `internal/agents/agents_test.go` (new),
+`internal/tools/worktree.go` (review/conflict report), `internal/config/config.go`,
+`internal/agent/agent.go` (entry).
+
+**Acceptance:**
+- [ ] Two-agent split on a fixture repo: both edit separate files; merge clean
+- [ ] Both edit the same file → conflict diff surfaced, no silent overwrite
+- [ ] Disabled by default; enabling requires explicit config
+- [ ] `go test -race ./internal/agents/...` green
+
+**Effort:** M (2–3 days) · **Risk:** high (nested API budget, concurrency) → **gated, default off**
+
+---
+
+### D4 — Scheduled automations  `[candidate — Phase 4, M]`
+
+**What DeepCode does:** saves a stable workflow and runs it manually or on a schedule (regression
+scans, test-repair, docs upkeep).
+
+**Why we want it:** Phase 5 gave us event hooks; a scheduler turns them into *standing* jobs the
+daemon owns — nightly `go test ./...` + auto-repair report, weekly docs-freshness scan.
+
+**Plan:**
+1. `eling automate add <name> <command|goal> --schedule "0 2 * * *"` (`internal/automate/
+   automate.go` + CLI), persisted in `config.yaml` (`automate.jobs[]`).
+2. Scheduler in the daemon (`internal/server/server.go`): cron-lite ticker (small internal
+   5-field crontab parser — no new heavy dep), **overlap guard** (never run the same job twice
+   concurrently; skip + log).
+3. Runs reuse the agent loop headlessly (session-less, `--run` style); output logged to
+   `~/.eling/automations.log`; failures fire `HookErrorOccurred`.
+4. `eling automate list/remove/logs`.
+
+**Files touched:** `internal/automate/automate.go` (new), `internal/cli/cli.go`,
+`internal/config/config.go`, `internal/server/server.go`, `internal/automate/automate_test.go` (new).
+
+**Acceptance:**
+- [ ] `eling automate add` persists; `list` shows it; daemon fires it at schedule (test with 1-minute schedule)
+- [ ] Overlap: a slow job running → second tick skipped + logged
+- [ ] `./rebuild.sh` green
+
+**Effort:** M (1–2 days) · **Risk:** medium (daemon lifecycle, time parsing)
+
+---
+
+### D5 — Evidence taxonomy per task type  `[⏳ folded into D2 — not standalone]`
+
+DeepCode picks evidence *by task*. Rather than a separate phase, D2's evidence selector (step 1)
+**is** the taxonomy — extend the table as new task types appear (Python → pyright diagnostics via
+LSP, HTML/JS → eslint via LSP). No separate ticket; tracked inside D2's `evidence.go`.
+
+---
+
+### D6 — Per-tool permission profiles (allow/ask/deny + project trust)  `[candidate — Phase 5, M]`
+
+**What DeepCode does:** per-tool permission levels (allow/ask/deny) and per-project trust, so
+destructive or sensitive tools are gated without blanket-approving everything.
+
+**Why we want it:** plan mode gates the *whole turn*; sandbox `guard_mode` blocks a fixed list.
+There's no way to say "bash: ask, but read/write/edit: allow" per project.
+
+**Plan:**
+1. Config: `permissions: { default: ask, rules: [ {tool: "bash", mode: "ask"}, {tool: "write",
+   mode: "allow"}, {tool: "rm", mode: "deny"} ] }` + `projects: { "/root/eling": {trust: full} }`.
+2. Enforce in `registry.ExecuteContext` (before dispatch): look up tool → mode; `deny` returns a
+   blocked result; `ask` routes to the same TUI y/N gate plan mode uses (reuse the checklist
+   renderer); `allow` runs (sandbox still applies).
+3. **Default preserves current behavior**: `ask` for `bash`, `allow` for safe tools — no surprise
+   gates on fresh install.
+
+**Files touched:** `internal/config/config.go`, `internal/tools/registry.go`, `internal/tui/tui.go`
+(ask gate), `internal/tools/permissions_test.go` (new).
+
+**Acceptance:**
+- [ ] `deny` on `bash` blocks with a reason; `allow` on `write` skips the gate
+- [ ] `ask` prompts exactly once per call in TUI
+- [ ] Fresh config → defaults match today's behavior (no surprise gates)
+
+**Effort:** M (1–2 days) · **Risk:** low (additive; default preserves behavior)
+
+---
+
+## 🟢 Verification Audit (2026-08-04) — race / double-function / effectiveness
+
+Audited every candidate against the real codebase (`/root/eling`). Result per item:
+🟢 safe · 🟡 amend before implementing · 🔴 reframe (would duplicate or regress).
+
+| # | Race | Double-func | Effective? | Verdict |
+|---|------|-------------|------------|---------|
+| D1 | 🟢 read-only boot-time probe; separate file | 🔴 `rules.go` exists but only **writes/detects** for other agents — no self-ingest; no conflict | 🟢 rules steering every turn = real win | 🟢 reuse learnings injection (A10) mechanism; cap size |
+| D2 | 🟢 new package; gate in tool loop is sequential | 🟡 `autoTest()` (Go-only, fire-and-forget) + `internal/layers/verify_on_stop.go` (nudge) — **no verify→repair loop exists** | 🟢 the #1 waste in coding agents; bounded by max_rounds | 🟢 cap rounds/timeouts; never claim success with failing evidence |
+| D3 | 🔴 nested agent concurrency = race risk (the v1 deferral) | 🟢 worktree.go is infra only — no orchestrator exists | 🟡 real win only if isolation holds | 🟡 gate default **off**; require `go test -race`; per-agent budget |
+| D4 | 🟢 scheduler single-goroutine ticker + overlap guard | 🟢 hooks (Phase 5) are event-driven — no scheduler exists | 🟢 | 🟢 add overlap guard + logs |
+| D5 | — | — | — | 🔴 reframe: **fold into D2** |
+| D6 | 🟢 additive check before dispatch | 🟢 no per-tool permission infra; plan mode + guard_mode are different layers | 🟢 | 🟢 default `ask`/`allow` preserves behavior |
+
+## 🔧 Amendments locked in (must be applied when implementing)
+
+1. **D1** — ingestion is **read-only** (never overwrite the user's AGENTS.md); probe order
+   `AGENTS.md` → `DEEPCODE.md` → `CLAUDE.md` → `.cursor/rules/*.mdc`; cap 4 KiB/40 lines; inject
+   via `buildMessages()` like A10. New code lives in `internal/layers/rules_ingest.go` (package
+   `layers`, already imported by the agent) — do **not** create a new `internal/rules` package.
+2. **D2** — bounded: reuse `internal/autorepair/state.go` maxRetries/backoff, default 2 rounds,
+   60 s per run; `--no-verify` + plan-mode opt-out; final answer always carries an `Evidence:`
+   block; **never report success with failing evidence**. ⚠️ The verification round counter MUST
+   be the **dedicated `verify.max_rounds` field** — do **not** rely on ELING's global
+   `maxToolRounds` (`internal/agent/agent.go:305` sets it to `math.MaxInt32`, i.e. effectively
+   unlimited; the real stop is the wall-clock `toolCtx` deadline). Each verify iteration must also
+   check `toolCtx.Err()` first to honor shutdown/config timeout.
+3. **D3** — `agents.enabled` default **off**; max 2 concurrent subagents; per-agent token budget
+   cap; merges go through `worktree_merge --review` diff report only; conflict = report, never
+   silent auto-merge; `go test -race ./internal/agents/...` mandatory.
+4. **D4** — overlap guard (skip + log concurrent runs of the same job); logs to
+   `~/.eling/automations.log`; failures fire `HookErrorOccurred`; no new heavy cron dep.
+5. **D6** — additive only: default `ask` for `bash`, `allow` for safe tools → fresh-install
+   behavior identical to today; enforce before dispatch in `registry.ExecuteContext`.
+
+## 🧪 Testing & Safety (same rules as Parts I & II)
+
+1. `./rebuild.sh` mandatory before commit; `go test -race ./...` for D2 and D3 (concurrency).
+2. `create_backup` before each phase; one phase per commit.
+3. D1 (S) is the quick win → land first; D2 (S–M) is the headline phase → second.
+4. Update `docs/` (A7 subsystem docs — add `docs/verify.md`, `docs/rules.md` etc.) in the same
+   commit as any phase.
+5. Bump version via `go-version-bump` on milestones (D2 is a strong v0.5.0 candidate).
+
+## ❌ Not Adoptable / Out of Scope (DeepCode)
+
+- **Tauri desktop GUI** — architectural non-fit (Termux = TUI/CLI single binary).
+- **Paper2Code / Text2Web / Text2Backend** — product use-cases, not agent capabilities (and ELING
+  already builds offline HTML apps via its own tooling).
+- **Multi-model per-loop orchestration** — already covered by the provider catalog (A2) +
+  fallback chain (`getProvidersForFallback`).
+- **Reimplementing DeepCode's search/shell/static surfaces** — already equivalent: ugrep 7.5.0 +
+  sandbox + LSP (Phase 3).
+
+## 📚 Reference (Part III)
+
+- DeepCode repo: https://github.com/HKUDS/DeepCode — local clone target: `/root/deepcode`
+  (clone depth-1 before Phase D2 study)
+- Key DeepCode concepts to study before implementing:
+  - **Loop Engineering / evidence-driven completion** (D2) — docs on goal loop + verification evidence
+  - **Multi-agent worktree orchestration** (D3) — isolated worktrees + conflict surfacing
+  - **Context Engineering / project rules** (D1) — `AGENTS.md`/`DEEPCODE.md` ingestion
+  - **Automations** (D4) — saved workflows + scheduling
+  - **Permissions** (D6) — per-tool allow/ask/deny + project trust
