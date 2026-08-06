@@ -20,6 +20,7 @@ Inspired by [jcode](https://github.com/1jehuang/jcode) and battle-tested with **
 | **Tool Calling** | Full function-calling with multi-round tool execution |
 | **Context Budgeting** | Intelligent token budget management with history trimming |
 | **LLM Summarization** | Periodic LLM-generated conversation summaries for long context |
+| **Project Rules** | Ingests the project's own rules (AGENTS.md/DEEPCODE.md/CLAUDE.md/.cursor/rules) into every turn, read-only, capped at 4 KiB |
 
 ### 🧠 Memory & Learning
 | Feature | Details |

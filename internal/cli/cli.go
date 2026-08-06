@@ -78,6 +78,8 @@ func RunCLI(cfg *config.Config, version string, args []string) bool {
 		return cmdDecay(cfg, subArgs)
 	case "init-rules":
 		return cmdInitRules(subArgs)
+	case "rules":
+		return cmdRules(subArgs)
 	case "mcp":
 		return cmdMCP(subArgs)
 	case "continuum":
@@ -1252,6 +1254,54 @@ func cmdInitRules(args []string) bool {
 	return true
 }
 
+// cmdRules implements the `eling rules` subcommand (D1, DeepCode heist):
+//
+//	eling rules show [--project-dir <dir>]   print the ingested project rules
+//	eling rules --refresh [--project-dir <dir>]  re-probe + reprint (read-only)
+//
+// Always read-only — it never writes or modifies the user's rules file.
+func cmdRules(args []string) bool {
+	projectDir := "."
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--project-dir":
+			if i+1 < len(args) {
+				i++
+				projectDir = args[i]
+			}
+		case "--refresh":
+			// --refresh is a no-op distinction for clarity: we always probe
+			// the filesystem fresh, so there is nothing cached to invalidate.
+		case "show":
+			// default action; kept explicit for readability.
+		case "help", "--help", "-h":
+			fmt.Println("Usage: eling rules [show] [--project-dir <dir>] [--refresh]")
+			fmt.Println("  Reads the project's own rules (AGENTS.md/DEEPCODE.md/CLAUDE.md/.cursor/rules) read-only.")
+			return true
+		}
+	}
+
+	absDir, err := filepath.Abs(projectDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return true
+	}
+	if _, err := os.Stat(absDir); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: project directory %s not found\n", absDir)
+		return true
+	}
+
+	file, content := layers.LoadProjectRules(absDir)
+	if content == "" {
+		fmt.Printf("No project rules found in %s (probed AGENTS.md, DEEPCODE.md, CLAUDE.md, .cursor/rules/*.mdc)\n", absDir)
+		return true
+	}
+	fmt.Printf("Project rules from: %s\n", file)
+	fmt.Println("---")
+	fmt.Println(content)
+	return true
+}
+
 type ruleResult struct {
 	Agent  string `json:"agent"`
 	Action string `json:"action"`
@@ -2367,6 +2417,7 @@ Configuration:
 
 Agent Integration:
   init-rules [--project-dir <dir>]  Write steering rules for AI agents
+  rules show [--project-dir <dir>]  Show the project's own rules (ingested, read-only)
   install-opencode                   Install ELING plugin into OpenCode
   install-zero                       Install ELING hooks into Zero
   install-termux                     Install Termux launcher scripts

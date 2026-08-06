@@ -585,7 +585,7 @@ already ✅ above. **A6 ✅ (2026-08-03, lsp_rename tool + applyEdit safety net)
 
 | # | Adoption | Status | Effort | Value | ELING anchor (today) |
 |---|----------|--------|--------|-------|----------------------|
-| D1 | **Project rules ingestion** (AGENTS.md/CLAUDE.md/DEEPCODE.md → system prompt) | ⏳ | S | 🔥🔥🔥 | `internal/layers/rules.go` (writes/detects only — no self-ingest); `buildMessages()` + learnings injection (A10) |
+| D1 | **Project rules ingestion** (AGENTS.md/CLAUDE.md/DEEPCODE.md → system prompt) | ✅ 2026-08-06 | S | 🔥🔥🔥 | `internal/layers/rules_ingest.go` (new); `agent.go` boot-load + `buildMessages()` inject (A10 path); `cli.go` `eling rules show`/`--refresh` |
 | D2 | **Verify→Repair loop** (evidence-driven completion / Loop Engineering) | ⏳ | S–M | 🔥🔥🔥 | `agent.go:3088 autoTest()` (Go-only, fire-and-forget); `internal/autorepair/state.go` (maxRetries/backoff); `internal/layers/verify_on_stop.go` (nudge only) |
 | D3 | **Multi-agent parallelism in isolated worktrees** (conflict-surfaced) | ⏳ | M | 🔥🔥 | `internal/tools/worktree.go` (Phase 1 infra exists); SubAgents deferred since Part I |
 | D4 | **Scheduled automations** (`eling automate add … --schedule`) | ⏳ | M | 🔥🔥 | `internal/hooks/hooks.go` (Phase 5 events, no scheduler); `internal/server/server.go` (daemon) |
@@ -622,9 +622,9 @@ conventions by trial.
 `internal/layers/rules_ingest_test.go` (new).
 
 **Acceptance:**
-- [ ] Repo with `AGENTS.md` → rules appear in per-turn system messages (test asserts)
-- [ ] Missing rules file → silent skip, no crash
-- [ ] `./rebuild.sh` green; full suite passes
+- [x] Repo with `AGENTS.md` → rules appear in per-turn system messages (test asserts) — `TestBuildMessagesInjectsProjectRules` ✅ 2026-08-06
+- [x] Missing rules file → silent skip, no crash — `TestMissingRulesSilentSkip` ✅ 2026-08-06
+- [x] `./rebuild.sh` green; full suite passes ✅ 2026-08-06
 
 **Effort:** S (half day) · **Risk:** very low
 

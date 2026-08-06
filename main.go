@@ -210,6 +210,7 @@ func main() {
 			"reflect": true, "snapshot": true, "list-snapshots": true,
 			"rollback": true, "link-stats": true, "linked-facts": true,
 			"evolve": true, "stats": true, "learnings": true, "config": true, "init-rules": true,
+			"rules": true,
 			"mcp": true, "continuum": true, "blackbox": true, "markdownify": true,
 			"sync": true, "setup": true, "install-opencode": true, "install-zero": true,
 			"install-termux": true, "help": true,

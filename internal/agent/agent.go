@@ -124,6 +124,14 @@ type Agent struct {
 	// applies lessons learned in past sessions. Refreshed by Learn().
 	learnings []string
 
+	// projectRules (D1, DeepCode heist): the project's own rules file
+	// (AGENTS.md / DEEPCODE.md / CLAUDE.md / .cursor/rules) loaded at boot and
+	// injected into every turn's system context so repo-specific conventions
+	// steer the agent. Immutable after New() — read under the caller-held
+	// a.mu.RLock() in buildMessages (same discipline as a.learnings).
+	projectRules     string
+	projectRulesFile string
+
 	// State
 	stateDir    string
 	sessionName string
@@ -293,6 +301,21 @@ func New(cfg *config.Config) (*Agent, error) {
 		a.learnings = ls
 	} else {
 		log.Printf("Warning: could not load learnings: %v", err)
+	}
+
+	// D1 (DeepCode heist): ingest the project's own rules file (AGENTS.md /
+	// DEEPCODE.md / CLAUDE.md / .cursor/rules) at boot so repo-specific
+	// conventions steer every turn. Best-effort: a missing rules file or a
+	// probe error is a silent skip (no crash, no rules injected).
+	if cfg.Agent.ProjectRules {
+		cwd, err := os.Getwd()
+		if err != nil {
+			log.Printf("Warning: could not resolve cwd for project rules: %v", err)
+		} else if file, content := layers.LoadProjectRules(cwd); content != "" {
+			a.projectRules = content
+			a.projectRulesFile = file
+			log.Printf("Project rules loaded from %s (%d chars)", file, len(content))
+		}
 	}
 
 	return a, nil
@@ -2570,6 +2593,26 @@ SEARCH RULE (enforced): All text searches MUST use ugrep 7.5.0. Call the 'ugrep'
 		messages = append(messages, provider.Message{
 			Role:    "system",
 			Content: sb.String(),
+		})
+	}
+
+	// D1 (DeepCode heist): inject the project's own rules file so repo-specific
+	// conventions steer this turn. Loaded once at boot (immutable), capped at
+	// ~4 KiB by LoadProjectRules to protect small local-model budgets. Read
+	// under the caller-held a.mu.RLock() — same discipline as a.learnings.
+	if a.projectRules != "" {
+		// Honor a tighter per-instance cap if configured (0/negative = default).
+		maxChars := a.cfg.Agent.ProjectRulesMaxChars
+		if maxChars <= 0 {
+			maxChars = 4096
+		}
+		content := a.projectRules
+		if len(content) > maxChars {
+			content = content[:maxChars] + "\n... [project rules truncated]"
+		}
+		messages = append(messages, provider.Message{
+			Role:    "system",
+			Content: "[Project rules — apply when relevant]:\n" + content,
 		})
 	}
 
