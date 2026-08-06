@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -12,8 +14,8 @@ import (
 func init() {
 	DefaultRegistry.Register(Tool{
 		Name:        "create_backup",
-		Description: "Create a timestamped ZIP backup of the entire eling project, excluding the compiled binary and any existing backup zips.",
-		Version:     "1.1.0", // registry timeout budget
+		Description: "Create a timestamped ZIP backup of the entire eling project, excluding the compiled binary, any existing backup zips, and .bak files (rotation keeps the last 2 ZIPs).",
+		Version:     "1.2.0", // registry timeout budget
 		Category:    "system",
 		Execute:     backupExecute,
 		Timeout:     2 * time.Minute, // zipping a large tree can take a while
@@ -66,6 +68,7 @@ func backupExecute(args map[string]interface{}) (interface{}, error) {
 		"-x", "eling_new",
 		"-x", "eling_rebuild",
 		"-x", "*.zip",
+		"-x", "*.bak.*",
 		"-x", ".git/*",
 		"-x", "node_modules/*",
 		"-x", "vendor/*",
@@ -94,6 +97,9 @@ func backupExecute(args map[string]interface{}) (interface{}, error) {
 	if err == nil {
 		size = info.Size()
 	}
+
+	// Rotate old backup ZIPs, keeping only the most recent 2.
+	rotateZipBackups(backupDir)
 
 	return OK(map[string]interface{}{
 		"backup_path": backupPath,
@@ -142,4 +148,36 @@ func fmtSize(bytes int64) string {
 		return fmt.Sprintf("%.1f MB", float64(bytes)/(1024.0*1024.0))
 	}
 	return fmt.Sprintf("%.1f GB", float64(bytes)/(1024.0*1024.0*1024.0))
+}
+
+// rotateZipBackups removes older eling_backup_*.zip files from backupDir,
+// keeping only the most recent ELING_BACKUP_KEEP (default 2) archives.
+// The newest archive (including the one just created) is always kept.
+func rotateZipBackups(backupDir string) {
+	keep := 2
+	if s := os.Getenv("ELING_BACKUP_KEEP"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			keep = n
+		}
+	}
+
+	pattern := filepath.Join(backupDir, "eling_backup_*.zip")
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) <= keep {
+		return
+	}
+
+	// Sort by modification time ascending (oldest first)
+	sort.Slice(matches, func(i, j int) bool {
+		fi, errI := os.Stat(matches[i])
+		fj, errJ := os.Stat(matches[j])
+		if errI != nil || errJ != nil {
+			return matches[i] < matches[j]
+		}
+		return fi.ModTime().Before(fj.ModTime())
+	})
+
+	for _, m := range matches[:len(matches)-keep] {
+		_ = os.Remove(m)
+	}
 }

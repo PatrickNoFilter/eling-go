@@ -64,7 +64,7 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 | Tool | Description |
 |------|-------------|
 | `bash` | Execute shell commands with timeout and output limits |
-| `read` / `write` / `edit` | Full file ops with **auto-backup** (timestamped `.bak`, rotation keeps 5) |
+| `read` / `write` / `edit` | Full file ops with **auto-backup** (timestamped `.bak`, rotation keeps 2) |
 | `ls` | Directory listing with metadata |
 | `grep` | Pattern search with regex, file type filter (**ugrep** 7.5.0 — fuzzy `-Z`, archives `-z`, JSON/CSV output, `--bool`, smart case `-S`) |
 | `web_search` | DuckDuckGo search (with fallback endpoints + timeout prediction) |
@@ -117,7 +117,7 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 - **Bash sandbox** (v0.3.0): every `bash` command runs in a fresh per-invocation dir under `~/.eling/sandbox/` with a scrubbed env (locked PATH, HOME redirected, `ELING_SANDBOX=1`, API keys stripped), a 15-pattern destructive-command guard (`rm -rf /`, `mkfs`, `dd of=/dev/*`, fork bombs, `curl|sh`, …) that blocks by default, and best-effort network isolation via `unshare -n`. Real-tree operations require the explicit `allow_host: true` opt-in arg. Config: `sandbox.enabled/root/max_output/timeout_sec/guard_mode` (default **on**; `guard_mode: warn` downgrades blocks to warnings). TUI header shows `🏝️ snd on`.
 - **Git worktrees** (v0.3.0): `worktree_create`/`worktree_list`/`worktree_remove`/`worktree_merge` tools let the agent experiment on isolated branches under `~/.eling/worktrees/` — experiments never touch the main working tree until explicitly merged back
 - **UTF-8 safe**: Rune-aware truncation prevents splitting multi-byte chars
-- **Auto-backup before write/edit**: Every `write`/`edit` snapshots the existing file to `*.bak.<timestamp>` (rotation keeps the last 5; configurable via `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP`)
+- **Auto-backup before write/edit**: Every `write`/`edit` snapshots the existing file to `*.bak.<timestamp>` (rotation keeps the last 2; configurable via `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP`)
 - **Web timeout prediction**: `web_fetch`/`web_search` do a fast DNS+TCP preflight probe (dead hosts fail in ~1.5s) and adapt `--max-time` per host based on observed latency/failure history
 - **Hard tool timeouts** (v0.4.0): every tool now has a wall-clock budget (5 min default) enforced by the registry — context-aware tools (web, bash, ocr, read) cancel mid-flight via `CommandContext`, plain tools are cut off by a timer+goroutine guard, and `read` refuses files over 64 MiB up front. No tool can hang the turn; `ocr_review`/`ocr_scan` are capped at 5 min (`tool_timeout_sec` to override)
 - **MCP per-call timeouts** (v0.4.0): every MCP tool call runs under a wall-clock guard too — registry-backed tools (bash/read/write/edit/grep/web_*) keep their registry budgets, and the direct layer handlers (`brain_*`, `facts_*`, `kb_*`, `obsidian_*`, `continuum_*`, `notion_sync`, `markdownify_*`, `system_info`, `blackbox_*`, `code_*`) get strict budgets (10–60 s by category) so a slow layer or network call can never hang an MCP request. Callers can override with a `tool_timeout_sec` arg
@@ -751,7 +751,7 @@ ocr_health                                     # Check status
 7. **Unified skill management**: `ListSkills()` returns `[]tools.Tool` from the ToolRegistry (`category:"skill"`) — no separate `SkillManager`
 8. **No duplicate memory decay**: FactsLayer.ApplyDecay() handles all memory decay; the old in-memory `StartDecay()`/`StopDecay()` were removed during consolidation
 9. **Usage-based skill eviction**: Skills track their `UsedCount` and are evicted by lowest usage (not just age) when the 100-skill cap is reached
-10. **Auto-backup before every mutation**: `write`/`edit` snapshot the original file (`*.bak.<timestamp>`) with rotation (last 5) — no more lost code on bad edits; configurable via `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP`
+10. **Auto-backup before every mutation**: `write`/`edit` snapshot the original file (`*.bak.<timestamp>`) with rotation (last 2) — no more lost code on bad edits; configurable via `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP`
 11. **Timeout prediction for web tools**: `fetchPredictor` runs a fast DNS+TCP preflight (dead hosts fail in ~1.5s) and adapts curl `--max-time` per host from recorded latency/failure history — slow or dead hosts can no longer hang the agent
 12. **Reasoning-content persistence**: DeepSeek `reasoning_content` is stored with assistant messages and passed back on tool-loop follow-ups and session resume (DeepSeek thinking mode rejects assistant messages that omit it)
 13. **Stale-message guard in TUI**: generation counters (`genMsg`) discard messages from old goroutines after a new query is submitted — no more late tool results bleeding into the wrong conversation

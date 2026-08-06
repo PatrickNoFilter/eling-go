@@ -1,10 +1,12 @@
 package tools
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBackupFileCreatesSnapshot(t *testing.T) {
@@ -91,8 +93,36 @@ func TestRotateBackups(t *testing.T) {
 	rotateBackups(path, path+".bak.20260801_120006")
 
 	matches, _ := filepath.Glob(path + ".bak.*")
-	if len(matches) != 5 {
-		t.Fatalf("expected 5 backups after rotation, got %d: %v", len(matches), matches)
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 backups after rotation, got %d: %v", len(matches), matches)
+	}
+}
+
+func TestRotateZipBackups(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create 5 fake backup zips with distinct mtimes.
+	for i := 0; i < 5; i++ {
+		bp := filepath.Join(dir, fmt.Sprintf("eling_backup_2026080%d_12000%d.zip", i, i))
+		if err := os.WriteFile(bp, []byte("zip"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Millisecond) // ensure distinct modtimes
+	}
+
+	rotateZipBackups(dir)
+
+	matches, _ := filepath.Glob(filepath.Join(dir, "eling_backup_*.zip"))
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 zips after rotation, got %d: %v", len(matches), matches)
+	}
+	// The two newest (last written) must survive.
+	keep1 := filepath.Join(dir, "eling_backup_20260803_120003.zip")
+	keep2 := filepath.Join(dir, "eling_backup_20260804_120004.zip")
+	for _, m := range matches {
+		if m != keep1 && m != keep2 {
+			t.Fatalf("unexpected surviving zip: %s", m)
+		}
 	}
 }
 

@@ -58,7 +58,7 @@ func init() {
 	// Register write tool
 	DefaultRegistry.Register(Tool{
 		Name:        "write",
-		Description: "Write content to a file, creating directories if needed. Overwrites existing files. Automatically creates a timestamped .bak backup of the existing file before overwriting (rotation keeps the last 5 backups per file).",
+		Description: "Write content to a file, creating directories if needed. Overwrites existing files. Automatically creates a timestamped .bak backup of the existing file before overwriting (rotation keeps the last 2 backups per file).",
 		Version:     "1.1.0",
 		Category:    "system",
 		Execute:     writeExecute,
@@ -68,7 +68,7 @@ func init() {
 	// Register edit tool (like jcode's edit)
 	DefaultRegistry.Register(Tool{
 		Name:        "edit",
-		Description: "Replace specific text in a file with new text. Uses exact string matching (not regex). Specify old_string and new_string. Optionally pass occurrence (1-based, default 1) to pick which match to replace when old_string appears multiple times, and source_hash (the 'hash' value returned by the read tool) to abort the edit if the file changed since it was read — a mismatch returns both hashes so you can re-read and retry. Automatically creates a timestamped .bak backup before applying the edit (rotation keeps the last 5 backups per file).",
+		Description: "Replace specific text in a file with new text. Uses exact string matching (not regex). Specify old_string and new_string. Optionally pass occurrence (1-based, default 1) to pick which match to replace when old_string appears multiple times, and source_hash (the 'hash' value returned by the read tool) to abort the edit if the file changed since it was read — a mismatch returns both hashes so you can re-read and retry. Automatically creates a timestamped .bak backup before applying the edit (rotation keeps the last 2 backups per file).",
 		Version:     "1.2.0", // hash-anchored edits + occurrence targeting + per-file lock
 		Category:    "system",
 		Execute:     editExecute,
@@ -500,7 +500,7 @@ func whitespaceNormalizedHint(content, oldStr string) string {
 // If the ELING_BACKUP_DIR environment variable is set, backups are mirrored under
 // that central directory using the absolute path of the source file.
 //
-// Rotation: only the most recent ELING_BACKUP_KEEP backups (default 5) per source
+// Rotation: only the most recent ELING_BACKUP_KEEP backups (default 2) per source
 // file are retained; older ones are deleted automatically.
 func backupFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
@@ -535,9 +535,9 @@ func backupFile(path string) (string, error) {
 }
 
 // rotateBackups removes the oldest backups for a source file, keeping only the
-// most recent ELING_BACKUP_KEEP (default 5) snapshots.
+// most recent ELING_BACKUP_KEEP (default 2) snapshots.
 func rotateBackups(originalPath, backupPath string) {
-	keep := 5
+	keep := 2
 	if s := os.Getenv("ELING_BACKUP_KEEP"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			keep = n

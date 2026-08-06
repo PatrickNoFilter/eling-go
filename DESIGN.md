@@ -78,7 +78,7 @@
 - Skills stored as tools with `category:"skill"` in ToolRegistry — no separate SkillManager
 - `ListSkills()` returns `[]tools.Tool` directly from registry
 - Search via **ugrep 7.5.0** (all `grep` calls — fuzzy `-Z`, archives `-z`, JSON/CSV, `--bool`, smart case `-S`)
-- **Auto-backup before mutation**: every `write`/`edit` snapshots the file to `*.bak.<timestamp>` (rotation keeps 5; `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP` configurable)
+- **Auto-backup before mutation**: every `write`/`edit` snapshots the file to `*.bak.<timestamp>` (rotation keeps 2; `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP` configurable)
 - **Web timeout prediction** (`internal/tools/web_timeout.go`): fast DNS+TCP preflight probe (dead hosts fail in ~1.5s) + adaptive curl `--max-time` per host from recorded latency/failure history
 
 ### 6b. Setup Wizard (`eling setup` → `eling-wizard.sh` / `eling-setup`)
@@ -142,4 +142,4 @@ Adapted from [PatrickNoFilter/eling](https://github.com/PatrickNoFilter/eling) (
 - **`rebuild.sh`** — atomic rebuild (builds to temp, then `mv` — never `cp`, which truncates the running inode on overlayfs/proot and causes SIGBUS)
 - **`start.sh`** — launcher trapping fatal OS signals (SIGBUS/SIGSEGV/SIGABRT/SIGILL/SIGFPE) and writing crash reports with overlayfs guidance
 - **`kill-eling.sh`** — graceful shutdown helper (SIGTERM, never SIGKILL)
-- **Auto-backup** — every `write`/`edit` snapshots the original file before mutation (`*.bak.<timestamp>`, rotation keeps 5)
+- **Auto-backup** — every `write`/`edit` snapshots the original file before mutation (`*.bak.<timestamp>`, rotation keeps 2)
