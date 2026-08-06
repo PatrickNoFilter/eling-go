@@ -771,13 +771,13 @@ There's no way to say "bash: ask, but read/write/edit: allow" per project.
 
 ---
 
-### D7 — Atomic commit discipline (conventional commits + build/test gate)  `[IMPLEMENTED 2026-08-06 25a2050]`
+### D7 — Atomic commit discipline (conventional commits + build/test gate)  `[IMPLEMENTED 2026-08-06 3fc74af]`
 
 > ⚠️ **Outlier:** source is a **Claude Code skill**, not DeepCode —
 > [bring-shrubbery/atomic-commits](https://github.com/bring-shrubbery/atomic-commits) (MIT, 4
 > commits). Kept in Part III as a quick-win sibling candidate so all adoption items live in one list.
 
-**Status (25a2050, 2026-08-06):** Added a 5-line `ATOMIC COMMIT DISCIPLINE` paragraph to the
+**Status (3fc74af, 2026-08-06):** Added a 5-line `ATOMIC COMMIT DISCIPLINE` paragraph to the
 default system prompt in `internal/config/config.go` (next to the SEARCH RULE): plan atomic steps
 → implement ONE logical change → `go build` + `go vet` + `go test` → commit with a conventional
 message → repeat; never batch unrelated changes, never leave the tree red. New
