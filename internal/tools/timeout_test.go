@@ -131,3 +131,47 @@ func TestReadAbortsOnContextCancel(t *testing.T) {
 		t.Fatal("expected abort error on cancelled ctx")
 	}
 }
+
+// Regression: the tool's OWN budget must apply even when the caller's context
+// already carries a deadline that is LONGER than the tool's Timeout. Before the
+// fix, ExecuteContext skipped context.WithTimeout whenever ctx.Deadline()
+// returned a deadline, so a 30s tool called inside a 300s turn would inherit
+// only the 300s cap — the "timeout doesn't kick in" bug. Go takes the min of
+// parent deadline and budget, so budget must hold regardless of the parent.
+func TestExecuteContextToolBudgetHoldsUnderLongerParentDeadline(t *testing.T) {
+	name := "test_budget_vs_longer_parent"
+	DefaultRegistry.Register(Tool{
+		Name:     name,
+		Category: "system",
+		Timeout:  200 * time.Millisecond, // tool cap is the tighter constraint
+		ExecuteCtx: func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(5 * time.Second): // would exceed budget if uncapped
+				return "done", nil
+			}
+		},
+	})
+	defer DefaultRegistry.Unregister(name)
+
+	// Parent deadline is far longer than the tool's 200ms budget.
+	parent, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	start := time.Now()
+	_, err := DefaultRegistry.ExecuteContext(parent, name, nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected the tool's own budget to fire, got nil")
+	}
+	if !strings.Contains(err.Error(), "deadline exceeded") && !strings.Contains(err.Error(), "context") {
+		t.Fatalf("expected ctx deadline error, got: %v", err)
+	}
+	// The tool budget (200ms) must fire long before the 5-minute parent: the
+	// executor should return in well under the uncapped window.
+	if elapsed > 2*time.Second {
+		t.Fatalf("tool budget was not enforced: returned after %v (parent was 5min)", elapsed)
+	}
+}

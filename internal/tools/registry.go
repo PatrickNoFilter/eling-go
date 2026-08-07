@@ -415,18 +415,21 @@ func (r *Registry) ExecuteContext(ctx context.Context, name string, args map[str
 		}
 	}()
 
-	// Derive the tool's wall-clock budget. An explicit earlier deadline on the
-	// caller's context (turn max_duration, parent cancel) always wins.
+	// Derive the tool's wall-clock budget. Apply it unconditionally: Go's
+	// context.WithTimeout always keeps the MINIMUM of the parent deadline and
+	// the given budget, so the tool's own cap is never silently dropped when
+	// the caller passes a ctx that already carries a (possibly longer)
+	// deadline (turn max_duration, parent cancel). The caller's earlier
+	// deadline still "wins" — but so does the tool's budget when it is the
+	// tighter constraint. This guarantees web_fetch's 30s cap (and every
+	// tool's Timeout) can never be lost to a longer parent deadline, which
+	// previously made "the timeout not kick in".
 	budget := t.Timeout
 	if budget <= 0 {
 		budget = DefaultToolTimeout
 	}
-	execCtx := ctx
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(ctx, budget)
-		defer cancel()
-	}
+	execCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 
 	if t.ExecuteCtx != nil {
 		return t.ExecuteCtx(execCtx, args)

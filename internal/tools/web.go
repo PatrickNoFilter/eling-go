@@ -88,6 +88,15 @@ func curlGetCtx(ctx context.Context, targetURL string, headers ...string) (strin
 	}
 	hostname := u.Hostname()
 
+	// 0) Honor an already-cancelled/expired context BEFORE any network work:
+	//    the caller (turn deadline, Ctrl+C, or the registry's tool budget) must
+	//    abort the fetch immediately instead of burning the preflight window.
+	//    This is what makes the 30s tool budget (and shorter parent deadlines)
+	//    actually "kick in" for web_fetch.
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("fetch aborted (context cancelled before preflight): %w", err)
+	}
+
 	// 1) Timeout prediction: fast DNS + TCP preflight so dead hosts fail in
 	//    ~1s instead of hanging until curl's --max-time. The returned IPs are
 	//    handed to curl via --resolve so curl skips its own DNS lookup.
