@@ -27,6 +27,22 @@ type Config struct {
 	Automate    AutomateConfig    `yaml:"automate"`
 	Permissions PermissionsConfig `yaml:"permissions"`
 	Agents      AgentsConfig      `yaml:"agents"`
+	Output      OutputConfig      `yaml:"output"`
+}
+
+// OutputConfig governs how the agent shapes its user-facing output.
+// All fields are OPT-IN: the zero value preserves today's exact behavior, so a
+// fresh install sees no surprise capping or formatting changes.
+type OutputConfig struct {
+	// EndMessageRunes caps the length (in runes, i.e. user-visible chars) of
+	// the final assistant message of each completed turn. 0 disables the cap.
+	EndMessageRunes int `yaml:"end_message_runes,omitempty"`
+	// EndMessageParas caps the number of blank-line-separated paragraphs in the
+	// final message. 0 disables the cap.
+	EndMessageParas int `yaml:"end_message_paras,omitempty"`
+	// EndMessageNoMD strips common markdown bullets/bolding from the final
+	// message (markdown syntax, not content). Default false (off).
+	EndMessageNoMD bool `yaml:"end_message_no_md,omitempty"`
 }
 
 // PermissionsConfig configures the D6 per-tool permission profiles. It lets the
