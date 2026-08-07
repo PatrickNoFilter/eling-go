@@ -1,7 +1,8 @@
 # Session Budget — Implementation Plan
 
 **Date:** 2026-08-08
-**Status:** Proposal (pending approval)
+**Status:** Implemented — all core enforcement layers shipped (steps 1–5);
+step 6 CLI exposure partially done, P2 env override pending.
 **Scope:** Add a session-scoped resource budget to ELING. This is the aggregate
 safety net that does **not** exist today. Per-turn timeouts and per-tool budgets
 already exist; this plan adds the *session-level* bounds.
@@ -14,7 +15,7 @@ already exist; this plan adds the *session-level* bounds.
 | 2. `internal/budget` package (Enforce/BeginTurn/EndTurn, `Exceeded`) | ✅ done | `743fb7b` |
 | 3. Root deadline — `--run` + REPL `replCtx` | ✅ done | `94fc20d` |
 | 4. Turn-count bucket — REPL loop | ✅ done | `94fc20d` |
-| 5. Idle stopwatch — **REPL done; TUI pending** | 🟡 partial | `94fc20d` |
+| 5. Idle stopwatch — REPL + TUI (idle_timeout_sec, auto-save + quit) | ✅ done | `94fc20d` (REPL), `2e1325d` (TUI) |
 | 6. CLI exposure — `/session` live display done; `config` CLI keys + `/sessionbudget` pending | 🟡 partial | `94fc20d` |
 | P2 follow-up — `ELING_SESSION_MAX_DURATION_SEC` env override for automate/benchmark | ⬜ pending | — |
 
