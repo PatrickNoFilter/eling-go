@@ -33,6 +33,7 @@ const (
 	HookSyncStart            = "sync_start"
 	HookSyncComplete         = "sync_complete"
 	HookSyncError            = "sync_error"
+	HookEndMessageProduce    = "end_message_produce" // fired just before the final message is committed
 )
 
 // AllHooks is the canonical list of all hook names.
@@ -53,6 +54,7 @@ var AllHooks = []string{
 	HookSyncStart,
 	HookSyncComplete,
 	HookSyncError,
+	HookEndMessageProduce,
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
