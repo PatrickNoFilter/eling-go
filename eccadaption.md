@@ -165,6 +165,9 @@ func ManagerFromConfig(cfg config.MCPConfig) (*Manager, error)
 
 ## P3 — Rust-style `guardrails` scaffolding
 
+> **Status: DONE** — `internal/layers/guardrails.go` (P3.1, commit `94c1313`),
+> `GuardrailsConfig` block (commit `806272d`), agent wiring (commit `d038c56`).
+
 **Theory**: P1/P2 facts must be enforced by construction; add a `guardrails` module that, like Rust
 `Miri`/`compiler builtins` (compiler enforced runtime checks), pans to a set of whitebox checks and a
 hard-enum `GuardrailsAssert` that can be evaluated as a compile-time unit. Modelling scaffolding only —
