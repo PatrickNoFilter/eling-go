@@ -8,7 +8,7 @@
 > **Part I** (below) = Qwen Code heist (Phases 1–5, all ✅ DONE).
 > **Part II** (appended 2026-08-02) = oh-my-pi adoption list — **6 ✅ implemented (A1, A2, A5, A6, A7, A10),
 > 1 ⏳ deferred (A3)**. Re-audited 2026-08-02, A6 landed 2026-08-03.
-> **Part III** (appended 2026-08-04) = DeepCode heist — D1–D6 candidates; sprint order D1 → D2 → D4 → D6 → D3.
+> **Part III** (appended 2026-08-04) = DeepCode heist — D1–D7 candidates; sprint order D1 → D2 → D4 → D6 → D3. **All landed 2026-08-07** (D1 `49372ca`, D2 `b7d26e4`, D4 `8f733ae`, D6 `bdf1818`+`c6117eb`, D7 `a019885`, D3 `26a2a2f`). D3 gated default off.
 >
 > **Rule:** We *reimplement ideas*, never copy code. Apache-2.0 permits derivative work, but
 > ELING's Go architecture is different enough that clean-room reimplementation is the right call.
@@ -587,13 +587,13 @@ already ✅ above. **A6 ✅ (2026-08-03, lsp_rename tool + applyEdit safety net)
 |---|----------|--------|--------|-------|----------------------|
 | D1 | **Project rules ingestion** (AGENTS.md/CLAUDE.md/DEEPCODE.md → system prompt) | ✅ 2026-08-06 | S | 🔥🔥🔥 | `internal/layers/rules_ingest.go` (new); `agent.go` boot-load + `buildMessages()` inject (A10 path); `cli.go` `eling rules show`/`--refresh` |
 | D2 | **Verify→Repair loop** (evidence-driven completion / Loop Engineering) | ✅ 2026-08-06 | S–M | 🔥🔥🔥 | `internal/verify/evidence.go` + `loop.go` (new); `agent.go` `verifyToolCalls()` gate + `Round()`/`Final()` (wired, default ON); `verify.max_rounds` (not global `maxToolRounds`); `--no-verify` + plan-mode opt-out |
-| D3 | **Multi-agent parallelism in isolated worktrees** (conflict-surfaced) | ⏳ | M | 🔥🔥 | `internal/tools/worktree.go` (Phase 1 infra exists); SubAgents deferred since Part I |
+| D3 | **Multi-agent parallelism in isolated worktrees** (conflict-surfaced) | ✅ 2026-08-07 | M | 🔥🔥 | `internal/agents/orchestrator.go` (new: bounded 2-agent split, worktree isolation, conflict surfacing, no-silent-merge); `internal/config` `agents` block gated **off** by default |
 | D4 | **Scheduled automations** (`eling automate add … --schedule`) | ✅ 2026-08-07 | M | 🔥🔥 | `internal/automate/automate.go` (new: cron parse + overlap-guarded Scheduler); `cli.go` `eling automate …`; `config.go` `automate.jobs[]`; daemon starts scheduler when enabled |
 | D5 | **Evidence taxonomy per task type** | ✅ 2026-08-06 (via D2) | — | 🔥 | `internal/verify/evidence.go` selector — Go → `go test ./...`/`go vet`/LSP, docs → diff; **folded into D2** (not standalone) |
 | D6 | **Per-tool permission profiles** (allow/ask/deny + project trust) | ✅ 2026-08-07 | M | 🔥 | `internal/tools/permissions.go` (policy + resolution), `internal/config` `permissions` block, `eling permission …` CLI, TUI interactive ask-gate per call |
 | D7 | **Atomic commit discipline** (conventional commits + build/test gate) | ✅ 2026-08-06 | XS | 🔥 | default system prompt: only the SEARCH RULE — no commit-workflow rule |
 
-**Suggested sprint:** D1 ✅ → **D7 (XS quick win)** ✅ → D2 ✅ → D4 ✅ → D6 ✅ → D3 (quick wins first; D3 last — highest risk, gated). **Remaining:** D3.
+**Suggested sprint:** D1 ✅ → **D7 (XS quick win)** ✅ → D2 ✅ → D4 ✅ → D6 ✅ → D3 ✅ (quick wins first; D3 last — highest risk, gated). **All Part III candidates DONE (2026-08-07).** D2/D4/D6/D7 landed on `main`; D3 gated `/agents.Enabled=false` (safe for default installs; **not recommended on constrained hosts** — see D3 note).
 
 ---
 
@@ -680,7 +680,7 @@ ELING today: `autoTest()` (`agent.go:3088`) runs `go test` but **Go-only and fir
 
 ---
 
-### D3 — Multi-agent parallelism in isolated worktrees  `[candidate — Phase 3, M — gated, default off]`
+### D3 — Multi-agent parallelism in isolated worktrees  `[✅ DONE 2026-08-07 — 26a2a2f; config gated default off]`
 
 **What DeepCode does:** splits work into focused agents (investigate vs. implement vs. review)
 running in **isolated git worktrees**; changes never clobber each other; conflicts are surfaced
@@ -706,12 +706,14 @@ shipped in Phase 1 — so this is the **v2 un-defer**, now de-risked by isolatio
 `internal/agent/agent.go` (entry).
 
 **Acceptance:**
-- [ ] Two-agent split on a fixture repo: both edit separate files; merge clean
-- [ ] Both edit the same file → conflict diff surfaced, no silent overwrite
-- [ ] Disabled by default; enabling requires explicit config
-- [ ] `go test -race ./internal/agents/...` green
+- [x] Two-agent split on a fixture repo: both edit separate files; merge clean — test `TestTwoAgentSeparateFiles` ✅
+- [x] Both edit the same file → conflict diff surfaced, no silent overwrite — test `TestSameFileConflict` ✅
+- [x] Disabled by default; enabling requires explicit config — test `TestDisabledByDefault` ✅
+- [x] `go test -race ./internal/agents/...` green ✅ (build/vet/test all pass)
 
-**Effort:** M (2–3 days) · **Risk:** high (nested API budget, concurrency) → **gated, default off**
+**Effort:** M ⚡ **landed 2026-08-07 (`26a2a2f`)** · **Risk:** high (nested API budget, concurrency) → **gated, default off** (`agents.Enabled=false`)
+
+> **⚠️ Constrained-host note (proot/Android/Termux):** D3's *parallelism* is I/O-bound and fits, but it defaults **off** for a reason. On this 2-big-core big.LITTLE + ~2.9 GiB available / swap-tight proot box, each sub-agent's local toolchain (`go build ./...` cold is >30 s here) collides onto the same 2 fast cores → CPU saturation + swap thrash. **Do not enable D3 on this device.** If ever enabled on a desktop: keep `agents.max: 2`, with `agents.max: 1` + verify-loop off for weak hosts.
 
 ---
 
@@ -861,7 +863,7 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
 |---|------|-------------|------------|---------|
 | D1 | 🟢 read-only boot-time probe; separate file | 🔴 `rules.go` exists but only **writes/detects** for other agents — no self-ingest; no conflict | 🟢 rules steering every turn = real win | 🟢 reuse learnings injection (A10) mechanism; cap size |
 | D2 | 🟢 new package; gate in tool loop is sequential | ✅ implemented `b7d26e4` — `internal/verify/evidence.go` + `loop.go`; wired via `verifyToolCalls()`; bounded by `verify.max_rounds` (not global `maxToolRounds`) | 🟢 the #1 waste in coding agents; bounded by max_rounds | ✅ done — cap rounds/timeouts; never claim success with failing evidence |
-| D3 | 🔴 nested agent concurrency = race risk (the v1 deferral) | 🟢 worktree.go is infra only — no orchestrator exists | 🟡 real win only if isolation holds | 🟡 gate default **off**; require `go test -race`; per-agent budget |
+| D3 | 🔴 nested agent concurrency = race risk (the v1 deferral) | ✅ implemented `26a2a2f` — `internal/agents/orchestrator.go` (bounded 2-agent split, worktree isolation, conflict surfacing, no-silent-merge) | 🟡 real win only if isolation holds | 🟡 gated `agents.Enabled=false`; per-agent budget; `go test -race` |
 | D4 | 🟢 scheduler single-goroutine ticker + overlap guard | 🟢 hooks (Phase 5) are event-driven — no scheduler exists | 🟢 | ✅ implemented `8f733ae` — `internal/automate/automate.go`; overlap guard + `~/.eling/automations.log`; no new heavy cron dep |
 | D5 | — | — | — | ✅ folded into D2 (`evidence.go`) — done `b7d26e4` |
 | D6 | 🟢 additive check before dispatch | 🟢 no per-tool permission infra; plan mode + guard_mode are different layers | 🟢 | 🟢 default `ask`/`allow` preserves behavior |
@@ -878,9 +880,11 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
    maxRetries/backoff, `--no-verify` + plan-mode opt-out; each iteration checks `toolCtx.Err()` first
    to honor shutdown/config timeout; final answer always carries an `Evidence:` block; **never report
    success with failing evidence**.
-3. **D3** — `agents.enabled` default **off**; max 2 concurrent subagents; per-agent token budget
-   cap; merges go through `worktree_merge --review` diff report only; conflict = report, never
-   silent auto-merge; `go test -race ./internal/agents/...` mandatory.
+3. **D3** — ✅ applied `26a2a2f`: `agents.enabled` default **off**; max 2 concurrent subagents;
+   per-agent token budget cap; merges go through diff review report only (no-silent-merge);
+   conflict = surfaced, never auto-merge; `go test -race ./internal/agents/...` mandatory
+   (3 tests green: disabled-by-default, clean split, conflict-surfaced). Gated off, so a default
+   install is unaffected.
 4. **D4** — overlap guard (skip + log concurrent runs of the same job); logs to
    `~/.eling/automations.log`; failures fire `HookErrorOccurred`; no new heavy cron dep.
 5. **D6** — additive only: default `ask` for `bash`, `allow` for safe tools → fresh-install
@@ -890,7 +894,7 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
 
 1. `./rebuild.sh` mandatory before commit; `go test -race ./...` for D2 and D3 (concurrency).
 2. `create_backup` before each phase; one phase per commit.
-3. ✅ D1 (S) landed first (`49372ca`); D2 (S–M) the headline phase landed second (`b7d26e4`); D4 (M) landed third (`8f733ae`). **Remaining order:** D6 → D3.
+3. ✅ D1 (S) landed first (`49372ca`); D2 (S–M) the headline phase landed second (`b7d26e4`); D4 (M) landed third (`8f733ae`); D6 (M) fourth (`bdf1818` + tui `c6117eb`); D3 (M, gated) fifth and last (`26a2a2f`). **All Part III candidates landed 2026-08-07.**
 4. Update `docs/` (A7 subsystem docs — add `docs/verify.md`, `docs/rules.md` etc.) in the same
    commit as any phase. ✅ `docs/verify.md` shipped in `b7d26e4`; `docs/rules.md` in `49372ca`.
 5. Bump version via `go-version-bump` on milestones (D2 is a strong v0.5.0 candidate). ⏳ **Not yet bumped** — D2 (`b7d26e4`) is unversioned; latest tag is still `v0.4.4`. Consider a v0.5.0 tag now or at the next milestone.
