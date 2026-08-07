@@ -604,7 +604,7 @@ echo "$ctx" | grep -q '"tool_name":"edit"' && (cd /root/eling && go vet ./... >/
 
 ## 🔧 Provider Setup
 
-> **v0.8.0 (unreleased):** ECCADAption P1–P3 landed — **end-message shaping** (opt-in `output.end_message_runes/end_message_paras/end_message_no_md`, fires `end_message_produce`), **self-validated persistence** (session `verifyTotals` drift audit, MCP `ManagerFromConfig`/`Reset` reload on config edit, tested `permissions`→policy bridge), and **Rust-style guardrails** (`guardrails.audit` log-only / `guardrails.strict` hard-veto, four white-box invariants over emit paths). All new behaviors default **off** — a fresh install preserves v0.7.1 behavior exactly. See `eccadaption.md`.
+> **v0.8.0:** ECCADAption P1–P3 landed — **end-message shaping** (opt-in `output.end_message_runes/end_message_paras/end_message_no_md`, fires `end_message_produce`), **self-validated persistence** (session `verifyTotals` drift audit, MCP `ManagerFromConfig`/`Reset` reload on config edit, tested `permissions`→policy bridge), and **Rust-style guardrails** (`guardrails.audit` log-only / `guardrails.strict` hard-veto, four white-box invariants over emit paths). All new behaviors default **off** — a fresh install preserves v0.7.1 behavior exactly. See `eccadaption.md`.
 
 > **v0.7.1:** MCP server fixes — `mcp/srv.NewServer` now assigns a real `stdout` (it defaulted to nil, so the server could never answer an initialize handshake, seen as `context deadline exceeded` / empty client stdout), and `mcp.NewManager.Connect` now keeps the MCP server child process alive after `Connect` returns so spawned `elling --mcp` servers don't die on the first client. Fixes MCP client/server connectivity end-to-end.
 
