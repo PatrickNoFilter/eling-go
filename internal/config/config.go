@@ -13,20 +13,20 @@ import (
 
 // Config represents the full ELING configuration.
 type Config struct {
-	Agent      AgentConfig      `yaml:"agent"`
-	UI         UIConfig         `yaml:"ui"`
-	Memory     MemoryConfig     `yaml:"memory"`
-	MCP        MCPConfig        `yaml:"mcp"`
-	LSP        LSPConfig        `yaml:"lsp"`
-	Session    SessionConfig    `yaml:"session"`
-	Server     ServerConfig     `yaml:"server"`
-	Sandbox    SandboxConfig    `yaml:"sandbox"`
-	Hooks      HooksConfig      `yaml:"hooks"`
-	Autorepair AutorepairConfig `yaml:"autorepair"`
-	Verify     VerifyConfig     `yaml:"verify"`
-	Automate   AutomateConfig   `yaml:"automate"`
-	Permissions  PermissionsConfig `yaml:"permissions"`
-	Agents     AgentsConfig     `yaml:"agents"`
+	Agent       AgentConfig       `yaml:"agent"`
+	UI          UIConfig          `yaml:"ui"`
+	Memory      MemoryConfig      `yaml:"memory"`
+	MCP         MCPConfig         `yaml:"mcp"`
+	LSP         LSPConfig         `yaml:"lsp"`
+	Session     SessionConfig     `yaml:"session"`
+	Server      ServerConfig      `yaml:"server"`
+	Sandbox     SandboxConfig     `yaml:"sandbox"`
+	Hooks       HooksConfig       `yaml:"hooks"`
+	Autorepair  AutorepairConfig  `yaml:"autorepair"`
+	Verify      VerifyConfig      `yaml:"verify"`
+	Automate    AutomateConfig    `yaml:"automate"`
+	Permissions PermissionsConfig `yaml:"permissions"`
+	Agents      AgentsConfig      `yaml:"agents"`
 }
 
 // PermissionsConfig configures the D6 per-tool permission profiles. It lets the
@@ -64,8 +64,8 @@ func (p PermissionsConfig) Active() bool {
 // API budget to protect a free-tier quota when running in parallel.
 type AgentsConfig struct {
 	Enabled      bool   `yaml:"enabled"`       // parallel sub-agents gate (default off)
-	Max          int    `yaml:"max"`          // max concurrent sub-agents (0 = default 2)
-	Token        int    `yaml:"token_budget"` // per-sub-agent token budget cap (0 = unlimited)
+	Max          int    `yaml:"max"`           // max concurrent sub-agents (0 = default 2)
+	Token        int    `yaml:"token_budget"`  // per-sub-agent token budget cap (0 = unlimited)
 	WorktreeRoot string `yaml:"worktree_root"` // override for ~/.eling/worktrees (test/CI)
 }
 
@@ -193,6 +193,18 @@ type LSPConfig struct {
 type SessionConfig struct {
 	AutoSave bool   `yaml:"auto_save"`
 	SaveDir  string `yaml:"save_dir"`
+
+	// MaxDurationSec is a total wall-clock cap for the whole process/session,
+	// enforced as a root context.WithTimeout. 0 = off. Mainly for --run,
+	// automate, serve, benchmark (unattended surfaces).
+	MaxDurationSec int `yaml:"max_duration_sec"`
+
+	// MaxTurns caps the number of user Ask turns in a session. 0 = off.
+	MaxTurns int `yaml:"max_turns"`
+
+	// IdleTimeoutSec auto-saves and exits after N seconds with no user
+	// activity. 0 = off. Works for REPL and TUI (interactive surfaces).
+	IdleTimeoutSec int `yaml:"idle_timeout_sec"`
 }
 
 // ServerConfig configures the HTTP daemon (`eling serve`, Phase 4).
@@ -287,8 +299,11 @@ func DefaultConfig() *Config {
 			},
 		},
 		Session: SessionConfig{
-			AutoSave: true,
-			SaveDir:  filepath.Join(homeDir, ".eling", "sessions"),
+			AutoSave:       true,
+			SaveDir:        filepath.Join(homeDir, ".eling", "sessions"),
+			MaxDurationSec: 0, // 0 = off (no aggregate wall-clock bound)
+			MaxTurns:       0, // 0 = off (no turn-count cap)
+			IdleTimeoutSec: 0, // 0 = off (no auto exit on idle)
 		},
 		Server: ServerConfig{
 			Enabled: false,
@@ -315,7 +330,7 @@ func DefaultConfig() *Config {
 			Evidence:   "auto",
 		},
 		Automate: AutomateConfig{
-			Enabled: false,         // scheduler OFF by default (D4)
+			Enabled: false,             // scheduler OFF by default (D4)
 			Jobs:    []AutomationJob{}, // no jobs until added
 		},
 		Permissions: PermissionsConfig{}, // empty => inactive: historical allow behavior preserved (D6)

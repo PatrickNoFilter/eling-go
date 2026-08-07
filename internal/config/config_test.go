@@ -96,3 +96,64 @@ func TestAutomateConfigRoundTrip(t *testing.T) {
 		t.Errorf("old config without automate: jobs = %d, want 0", len(oldCfg.Automate.Jobs))
 	}
 }
+
+// TestSessionBudgetDefaultsAllZero guards that the session budget knobs
+// (max_duration_sec / max_turns / idle_timeout_sec) default to off, so a
+// fresh install behaves exactly as before — the budget is strictly opt-in.
+func TestSessionBudgetDefaultsAllZero(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Session.MaxDurationSec != 0 {
+		t.Errorf("MaxDurationSec = %d, want 0 (off)", cfg.Session.MaxDurationSec)
+	}
+	if cfg.Session.MaxTurns != 0 {
+		t.Errorf("MaxTurns = %d, want 0 (off)", cfg.Session.MaxTurns)
+	}
+	if cfg.Session.IdleTimeoutSec != 0 {
+		t.Errorf("IdleTimeoutSec = %d, want 0 (off)", cfg.Session.IdleTimeoutSec)
+	}
+}
+
+// TestSessionBudgetRoundTrip guards the three new keys persist through a
+// Load/Save round trip, and that an old config file without the keys loads
+// with all-zero (off) budgets — no migration needed.
+func TestSessionBudgetRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	cfg.Session.MaxDurationSec = 3600
+	cfg.Session.MaxTurns = 100
+	cfg.Session.IdleTimeoutSec = 600
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Session.MaxDurationSec != 3600 {
+		t.Errorf("MaxDurationSec = %d, want 3600", got.Session.MaxDurationSec)
+	}
+	if got.Session.MaxTurns != 100 {
+		t.Errorf("MaxTurns = %d, want 100", got.Session.MaxTurns)
+	}
+	if got.Session.IdleTimeoutSec != 600 {
+		t.Errorf("IdleTimeoutSec = %d, want 600", got.Session.IdleTimeoutSec)
+	}
+
+	// Backwards compatibility: a config file without session budget keys must
+	// load with all-zero (off) budgets.
+	old := "session:\n  auto_save: true\n  save_dir: \"/tmp/x\"\n"
+	oldPath := filepath.Join(dir, "old.yaml")
+	if err := os.WriteFile(oldPath, []byte(old), 0600); err != nil {
+		t.Fatalf("write old: %v", err)
+	}
+	oldCfg, err := Load(oldPath)
+	if err != nil {
+		t.Fatalf("load old: %v", err)
+	}
+	if oldCfg.Session.MaxDurationSec != 0 || oldCfg.Session.MaxTurns != 0 || oldCfg.Session.IdleTimeoutSec != 0 {
+		t.Errorf("old config without budget keys: got %+v, want all-zero", oldCfg.Session)
+	}
+}
