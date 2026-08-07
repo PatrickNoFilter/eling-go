@@ -16,6 +16,7 @@ import (
 
 	"eling/internal/agent"
 	"eling/internal/autorepair"
+	"eling/internal/budget"
 	"eling/internal/cli"
 	"eling/internal/config"
 	"eling/internal/learnings"
@@ -365,6 +366,14 @@ func main() {
 	autorepair.SetMaxRetries(cfg.Autorepair.MaxRetries)
 	autorepair.LoadQuarantineState()
 
+	// Wire the session resource budget (opt-in; all knobs default 0 = off).
+	// This is the aggregate safety net across the whole process/session.
+	sess := budget.New(budget.Config{
+		MaxTurns:    cfg.Session.MaxTurns,
+		MaxDuration: time.Duration(cfg.Session.MaxDurationSec) * time.Second,
+		IdleTimeout: time.Duration(cfg.Session.IdleTimeoutSec) * time.Second,
+	})
+
 	if *model != "" {
 		cfg.Agent.DefaultModel = *model
 	}
@@ -614,7 +623,9 @@ func main() {
 		s.Suffix = " thinking..."
 		s.Start()
 		defer recoverWithStack(ag)
-		response, err := ag.Ask(context.Background(), prompt)
+		askCtx, askCancel, _ := sess.Enforce(context.Background())
+		defer askCancel()
+		response, err := ag.Ask(askCtx, prompt)
 		s.Stop()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -655,8 +666,11 @@ func main() {
 		fmt.Println("\nELING - Auto-Learning AI Agent  (type /help for commands)")
 		fmt.Println()
 		scanner := bufio.NewScanner(os.Stdin)
-		// Create a cancellable context for graceful shutdown
-		replCtx, replCancel := context.WithCancel(context.Background())
+		// Create a cancellable context for graceful shutdown, layered on the
+		// optional session budget deadline (max_duration_sec, 0 = off).
+		baseCtx, baseCancel, _ := sess.Enforce(context.Background())
+		defer baseCancel()
+		replCtx, replCancel := context.WithCancel(baseCtx)
 		defer replCancel()
 		// Handle signals for REPL mode too
 		go func() {
@@ -675,12 +689,28 @@ func main() {
 			}
 			close(lines)
 		}()
+		// Session idle stopwatch (idle_timeout_sec, 0 = off). A nil channel
+		// never fires, so the ticker is inert unless the knob is configured.
+		var idleTick <-chan time.Time
+		if cfg.Session.IdleTimeoutSec > 0 {
+			it := time.NewTicker(5 * time.Second)
+			defer it.Stop()
+			idleTick = it.C
+		}
 		for {
 			fmt.Print(">>> ")
 			select {
 			case <-replCtx.Done():
 				fmt.Println("\nBye!")
 				goto replDone
+			case <-idleTick:
+				if sess.CheckIdle() != nil {
+					if err := ag.SaveState(); err != nil {
+						log.Printf("Warning: failed to save state: %v", err)
+					}
+					fmt.Println("\nsession idle limit reached — state saved")
+					goto replDone
+				}
 			case line, ok := <-lines:
 				if !ok {
 					goto replDone
@@ -689,6 +719,7 @@ func main() {
 				if input == "" {
 					continue
 				}
+				sess.Activity()
 
 				if strings.HasPrefix(input, "/") {
 					parts := strings.Fields(input)
@@ -772,6 +803,12 @@ func main() {
 						} else {
 							fmt.Println("  no active session")
 						}
+						if snap := sess.Snapshot(); snap.Armed {
+							fmt.Printf("  budget: %d/%d turns, max_dur=%v, idle=%v\n",
+								snap.TurnsUsed, snap.MaxTurns, snap.MaxDuration, snap.IdleTimeout)
+						} else {
+							fmt.Println("  budget: off (max_turns/max_duration_sec/idle_timeout_sec = 0)")
+						}
 					case "/providers":
 						for _, p := range ag.ListProviders() {
 							fmt.Printf("  - %s\n", p)
@@ -782,6 +819,13 @@ func main() {
 						fmt.Printf("  Unknown command %s (try /help)\n", cmd)
 					}
 					continue
+				}
+
+				// Session turn budget (max_turns, 0 = off): count this turn
+				// and stop gracefully once the cap is reached.
+				if sess.BeginTurn() {
+					fmt.Printf("\nsession turn limit reached (max %d turns)\n", cfg.Session.MaxTurns)
+					goto replDone
 				}
 
 				// Show spinner while waiting
