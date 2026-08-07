@@ -219,6 +219,7 @@ func main() {
 			"search-temporal": true, "version-history": true,
 			"versioned-update": true, "undo-version": true,
 			"autorepair": true, "tools-health": true, "health": true,
+			"permission": true, "permissions": true,
 		}
 		if cliSubcommands[cliCmd] {
 			// Handle CLI commands with minimal setup
@@ -420,6 +421,15 @@ func main() {
 			log.Printf("⚠️  could not persist stats: %v", err)
 		}
 	}()
+
+	// D6 (DeepCode heist): install the per-tool permission policy from config.
+	// A fully-empty `permissions` block is inactive and preserves the
+	// historical allow-everything behaviour; once any rule/default/project is
+	// configured, unlisted tools resolve to the default mode. The interactive
+	// TUI attaches an "ask" gate per submit; in headless / serve / automate
+	// runs the nil gate degrades "ask" to "allow" so nothing silently blocks.
+	cwd, _ := os.Getwd()
+	tools.DefaultRegistry.SetPermissions(permPolicyFromConfig(cfg.Permissions), cwd)
 
 	// Phase 1: configure the bash sandbox from config (default on).
 	tools.SetSandbox(tools.SandboxSettings{
@@ -821,4 +831,21 @@ func truncateStr(s string, n int) string {
 		return s
 	}
 	return string(runes[:n]) + "..."
+}
+
+// permPolicyFromConfig translates the YAML `permissions` block into the
+// tools.PermPolicy used by the registry at runtime. A fully-empty block is
+// inactive (historical allow-everything behaviour, no surprise gates); once
+// active, only valid modes are kept in the tool rules.
+func permPolicyFromConfig(p config.PermissionsConfig) tools.PermPolicy {
+	if !p.Active() {
+		return tools.PermPolicy{}
+	}
+	rules := make(map[string]string, len(p.Rules))
+	for _, r := range p.Rules {
+		if tools.ValidPermMode(r.Mode) {
+			rules[r.Tool] = r.Mode
+		}
+	}
+	return tools.NewPermPolicy(p.Default, rules, p.Projects)
 }

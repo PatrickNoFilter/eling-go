@@ -345,14 +345,15 @@ func (r *Registry) ExecuteContext(ctx context.Context, name string, args map[str
 	// user via the interactive gate (installed by the CLI; nil here in headless
 	// runs degrades "ask" to "allow"). The empty/inactive policy yields
 	// "allow" for every tool, so a fresh install is unaffected.
-	if mode, reason := r.perm.ModeFor(name, r.projectDir); mode != PermAllow {
+	r.mu.RLock()
+	mode, reason := r.perm.ModeFor(name, r.projectDir)
+	g := r.gate
+	r.mu.RUnlock()
+	if mode != PermAllow {
 		if mode == PermDeny {
 			return nil, fmt.Errorf("tool %q blocked by permission policy (%s); adjust with `eling permission set %s allow`", name, reason, name)
 		}
 		// PermAsk: consult the gate (if any). Exactly one call per execution.
-		r.mu.RLock()
-		g := r.gate
-		r.mu.RUnlock()
 		if g != nil {
 			ok, gerr := g(name, args)
 			if gerr != nil {

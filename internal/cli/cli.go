@@ -117,6 +117,8 @@ func RunCLI(cfg *config.Config, version string, args []string) bool {
 		return cmdAutomate(cfg, subArgs)
 	case "tools-health", "health":
 		return cmdAutorepair(cfg, subArgs)
+	case "permission", "permissions":
+		return cmdPermissions(cfg, subArgs)
 	case "help", "--help", "-h":
 		printHelp()
 		return true
@@ -1279,6 +1281,153 @@ func compact(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// ── Permission Commands (D6) ──────────────────────────────────────────────
+
+// cmdPermissions manages the D6 per-tool permission policy. It operates on the
+// YAML model (cfg.Permissions) and persists via cfg.Save, so changes survive
+// across runs and the freshly-built DefaultRegistry picks them up at startup:
+//
+//	eling permission                 show the current policy
+//	eling permission list            show the current policy
+//	eling permission set <tool> <mode>     allow|ask|deny for one tool
+//	eling permission unset <tool>          drop a tool rule
+//	eling permission set-default <mode>    default for unlisted tools
+//	eling permission project <path> <t>    project trust (full|ask|deny)
+//	eling permission reset                clear the whole block
+func cmdPermissions(cfg *config.Config, args []string) bool {
+	validMode := func(m string) bool {
+		switch m {
+		case "allow", "ask", "deny":
+			return true
+		}
+		return false
+	}
+	validTrust := func(t string) bool {
+		switch t {
+		case "full", "ask", "deny":
+			return true
+		}
+		return false
+	}
+	save := func() {
+		if err := cfg.Save(config.FindConfigPath()); err != nil {
+			fmt.Printf("⚠️  could not persist config: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	if len(args) == 0 || args[0] == "list" {
+		printPermissions(cfg.Permissions)
+		return true
+	}
+
+	switch args[0] {
+	case "set":
+		if len(args) != 3 || !validMode(args[2]) {
+			fmt.Println("usage: eling permission set <tool> <allow|ask|deny>")
+			return true
+		}
+		upsertPermRule(cfg, args[1], args[2])
+		save()
+		fmt.Printf("✅ permission %s → %s (saved to %s)\n", args[1], args[2], config.FindConfigPath())
+	case "unset":
+		if len(args) != 2 {
+			fmt.Println("usage: eling permission unset <tool>")
+			return true
+		}
+		if removePermRule(cfg, args[1]) {
+			save()
+			fmt.Printf("✅ removed permission rule for %s (default now applies)\n", args[1])
+		} else {
+			fmt.Printf("no permission rule for %q — nothing to remove\n", args[1])
+		}
+	case "set-default":
+		if len(args) != 2 || !validMode(args[1]) {
+			fmt.Println("usage: eling permission set-default <allow|ask|deny>")
+			return true
+		}
+		cfg.Permissions.Default = args[1]
+		save()
+		fmt.Printf("✅ default mode for unlisted tools → %s (saved to %s)\n", args[1], config.FindConfigPath())
+	case "project":
+		if len(args) != 3 || !validTrust(args[2]) {
+			fmt.Println("usage: eling permission project <path> <full|ask|deny>")
+			return true
+		}
+		abs, err := filepath.Abs(args[1])
+		if err != nil {
+			abs = args[1]
+		}
+		if cfg.Permissions.Projects == nil {
+			cfg.Permissions.Projects = map[string]string{}
+		}
+		cfg.Permissions.Projects[abs] = args[2]
+		save()
+		fmt.Printf("✅ project trust %s → %s (saved to %s)\n", abs, args[2], config.FindConfigPath())
+	case "reset":
+		cfg.Permissions = config.PermissionsConfig{}
+		save()
+		fmt.Printf("✅ permission policy cleared — all tools allowed (historical behavior)\n")
+	default:
+		fmt.Printf("unknown permission subcommand %q — see `eling help`\n", args[0])
+	}
+	return true
+}
+
+// upsertPermRule inserts or updates a per-tool rule.
+func upsertPermRule(cfg *config.Config, tool, mode string) {
+	for i := range cfg.Permissions.Rules {
+		if cfg.Permissions.Rules[i].Tool == tool {
+			cfg.Permissions.Rules[i].Mode = mode
+			return
+		}
+	}
+	cfg.Permissions.Rules = append(cfg.Permissions.Rules, config.PermissionRule{Tool: tool, Mode: mode})
+}
+
+// removePermRule drops a per-tool rule, returning true if it existed.
+func removePermRule(cfg *config.Config, tool string) bool {
+	for i := range cfg.Permissions.Rules {
+		if cfg.Permissions.Rules[i].Tool == tool {
+			cfg.Permissions.Rules = append(cfg.Permissions.Rules[:i], cfg.Permissions.Rules[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// printPermissions renders the D6 permission policy to stdout.
+func printPermissions(p config.PermissionsConfig) {
+	if !p.Active() {
+		fmt.Println("ℹ️  No permission policy configured — all tools are allowed (historical behavior).")
+		fmt.Println("   Enable gating with `eling permission set-default ask` or `eling permission set <tool> <mode>`.")
+		return
+	}
+	def := p.Default
+	if def == "" {
+		def = "ask" // an active policy without an explicit default asks
+	}
+	fmt.Println("Permission policy: ACTIVE")
+	fmt.Printf("  default (unlisted tools): %s\n", def)
+	if len(p.Rules) > 0 {
+		fmt.Println("  tool rules:")
+		for _, r := range p.Rules {
+			fmt.Printf("    %-24s %s\n", r.Tool, r.Mode)
+		}
+	}
+	if len(p.Projects) > 0 {
+		fmt.Println("  project trust:")
+		paths := make([]string, 0, len(p.Projects))
+		for path := range p.Projects {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			fmt.Printf("    %-40s %s\n", path, p.Projects[path])
+		}
+	}
 }
 
 // ── Config Commands ───────────────────────────────────────────────────────
@@ -2698,6 +2847,14 @@ Tool Auto-Repair (A14):
   autorepair reenable <tool>  Re-enable a quarantined tool
   autorepair autofix on|off   Toggle the opt-in autofix gate
   tools-health                Alias for the autorepair dashboard
+
+Permissions (D6):
+  permission                 Show the per-tool permission policy
+  permission set <tool> <mode>   Set a tool rule (mode: allow|ask|deny)
+  permission unset <tool>    Remove a tool rule
+  permission set-default <mode>  Set default mode for unlisted tools
+  permission project <path> <trust>  Set project trust (trust: full|ask|deny)
+  permission reset           Clear the entire permission policy
 
 Configuration:
   setup [--list]            Enter the setup wizard (interactive)
