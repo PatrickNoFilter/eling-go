@@ -582,6 +582,8 @@ echo "$ctx" | grep -q '"tool_name":"edit"' && (cd /root/eling && go vet ./... >/
 
 ## 🔧 Provider Setup
 
+> **v0.7.0:** Codebase-memory (`cbm_*`) tools now advertise required params (`project`, `query`, `repo_path`, …) in the provider schema, mirroring the `*` env-var arguments their wrappers expect — fixing the `project not found` class of bug where the LLM never sent the required `project`/`query` arg. Adds `TestCBMProjectParamAdvertised` as a regression guard.
+
 > **v0.6.0:** Session resource budget — configurable `session.max_duration_sec` / `session.max_turns` / `session.idle_timeout_sec` (default all `0 = off`) enforced across the **REPL and TUI** (root deadline, per-turn bucket, idle stopwatch), with auto-save on idle/turn-limit exit, a `/budget` slash command, config CLI keys, and an `ELING_SESSION_MAX_DURATION_SEC` env override for unattended `automate`/`benchmark` runs. See `docs/session.md` and `sessionbudget.md`.
 
 > **v0.4.4:** Stats persistence + learnings injection — `Agent.GetStats()` now carries runtime metrics (tool call counts, success rate, avg latency, per-provider spend) that are saved to `~/.eling/stats.json` on graceful shutdown and rendered by `./eling stats`; durable learnings from `~/.eling/learnings.md` are **injected into the system prompt at boot** (capped to the last 10), so lessons from past sessions carry forward automatically.
