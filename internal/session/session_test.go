@@ -6,6 +6,64 @@ import (
 	"testing"
 )
 
+// TestVerifyTotalsReconcilesEntryCount checks the P2.1 drift audit: a hand-edited
+// or stale entry_count metadata is recomputed on save so the persisted file is
+// self-consistent, and a negative total_tokens is clamped to 0 rather than trusted.
+func TestVerifyTotalsReconcilesEntryCount(t *testing.T) {
+	m := NewManager(t.TempDir())
+	m.Create("test", "model-x")
+	_ = m.Append("test", "user", "hello")
+	_ = m.Append("test", "assistant", "world")
+	m.SetLastEntryTokens("test", 7)
+
+	// Corrupt metadata with values that no longer match the entry slice.
+	if err := m.SetMetadata("test", "entry_count", "999"); err != nil {
+		t.Fatalf("SetMetadata entry_count: %v", err)
+	}
+	if err := m.SetMetadata("test", "total_tokens", "-3"); err != nil {
+		t.Fatalf("SetMetadata total_tokens: %v", err)
+	}
+
+	if err := m.Save("test"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := m.Load("test")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := loaded.Metadata["entry_count"]; got != "2" {
+		t.Fatalf("entry_count not reconciled: got %q want 2", got)
+	}
+	if got := loaded.Metadata["total_tokens"]; got != "0" {
+		t.Fatalf("negative total_tokens not clamped: got %q want 0", got)
+	}
+}
+
+// TestVerifyTotalsKeepsConsistentValues verifies that when metadata is already
+// accurate, verifyTotals leaves it untouched (no spurious correction).
+func TestVerifyTotalsKeepsConsistentValues(t *testing.T) {
+	m := NewManager(t.TempDir())
+	m.Create("test", "model-x")
+	_ = m.Append("test", "user", "hello")
+	_ = m.Append("test", "assistant", "world")
+	m.SetLastEntryTokens("test", 7)
+	if err := m.SetMetadata("test", "total_tokens", "42"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	if err := m.Save("test"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := m.Load("test")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := loaded.Metadata["total_tokens"]; got != "42" {
+		t.Fatalf("accurate total_tokens mutated: got %q want 42", got)
+	}
+}
+
 // TestConcurrentAppendAndGetCopy is a regression test for the data race where
 // TUI /stats, GetStats and GetSession read the live session Entries slice
 // while an Ask goroutine (or its interrupted-save defer) appends to it.

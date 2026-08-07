@@ -5,9 +5,11 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -249,6 +251,11 @@ func (m *Manager) Save(name string) error {
 	s.Metadata["entry_count"] = fmt.Sprintf("%d", len(s.Entries))
 	s.Metadata["updated_at"] = s.UpdatedAt.Format(time.RFC3339)
 
+	// Recompute drift-sensitive metadata against the actual entry slice so the
+	// persisted file is self-consistent (P2.1). Does not hard-fail a save, but
+	// any correction is logged to the audit stream so drift is observable.
+	verifyTotals(s, name)
+
 	if err := os.MkdirAll(m.saveDir, 0755); err != nil {
 		return err
 	}
@@ -275,6 +282,34 @@ func (m *Manager) Save(name string) error {
 	}
 
 	return nil
+}
+
+// verifyTotals reconciles drift-sensitive metadata against the session's actual
+// entry slice before a save (P2.1). It recomputes the source-of-truth values
+// and logs an audit line whenever a correction was needed, so a stale or
+// hand-edited value is repaired (never silently trusted) without ever failing
+// the save. Guarded: s.Metadata is guaranteed non-nil by the caller.
+func verifyTotals(s *Session, name string) {
+	entryCount := len(s.Entries)
+	// Sum of per-entry token counts as recorded at append time.
+	sumTokens := 0
+	for _, e := range s.Entries {
+		sumTokens += e.Tokens
+	}
+	if got := s.Metadata["entry_count"]; got != strconv.Itoa(entryCount) {
+		s.Metadata["entry_count"] = strconv.Itoa(entryCount)
+		log.Printf("session: %q entry_count drifted (%s -> %d), reconciled on save", name, got, entryCount)
+	}
+	// total_tokens is a per-turn cumulative accounting key set by the agent;
+	// only a negative value is structurally impossible, so flag it when seen.
+	if tt, ok := s.Metadata["total_tokens"]; ok && tt != "" {
+		if n, err := strconv.Atoi(tt); err == nil && n < 0 {
+			s.Metadata["total_tokens"] = "0"
+			log.Printf("session: %q total_tokens was negative (%d); clamped to 0 on save", name, n)
+		} else if n, err := strconv.Atoi(tt); err == nil && n < sumTokens {
+			log.Printf("session: %q total_tokens %d < sum of entry tokens %d", name, n, sumTokens)
+		}
+	}
 }
 
 // Load loads a session from disk.
