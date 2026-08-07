@@ -23,6 +23,30 @@ type Config struct {
 	Hooks      HooksConfig      `yaml:"hooks"`
 	Autorepair AutorepairConfig `yaml:"autorepair"`
 	Verify     VerifyConfig     `yaml:"verify"`
+	Automate   AutomateConfig   `yaml:"automate"`
+}
+
+// AutomateConfig configures the D4 scheduled-automations subsystem. When
+// Enabled and the daemon (`eling serve`) is running, jobs defined in Jobs[]
+// fire on their cron schedule (5-field crontab). Each job runs headlessly and
+// its stdout/stderr is appended to ~/.eling/automations.log. Overlap is
+// guarded: a job whose previous run is still in-flight is skipped (and
+// logged), never run twice concurrently.
+type AutomateConfig struct {
+	Enabled bool            `yaml:"enabled"` // daemon starts the scheduler when true
+	Jobs    []AutomationJob `yaml:"jobs"`
+}
+
+// AutomationJob is one scheduled automation. Exactly one of Command or Goal
+// should be set. name must be unique across jobs.
+type AutomationJob struct {
+	Name       string `yaml:"name"`
+	Command    string `yaml:"command,omitempty"` // shell command to run (headless exec)
+	Goal       string `yaml:"goal,omitempty"`    // natural-language goal run through the agent
+	Schedule   string `yaml:"schedule"`          // 5-field crontab: "min hour dom mon dow"
+	Enabled    bool   `yaml:"enabled"`
+	LastRun    string `yaml:"last_run,omitempty"`    // RFC3339 of most recent fire
+	LastStatus string `yaml:"last_status,omitempty"` // ok | error:<summary>
 }
 
 // VerifyConfig configures the D2 verify→repair loop (DeepCode heist). When
@@ -244,6 +268,10 @@ func DefaultConfig() *Config {
 			MaxRounds:  2,    // repair iterations before honest-failure reporting
 			TimeoutSec: 60,   // per-run evidence timeout
 			Evidence:   "auto",
+		},
+		Automate: AutomateConfig{
+			Enabled: false,         // scheduler OFF by default (D4)
+			Jobs:    []AutomationJob{}, // no jobs until added
 		},
 	}
 }

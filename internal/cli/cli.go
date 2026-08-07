@@ -18,6 +18,7 @@ import (
 
 	"eling/internal/agent"
 	"eling/internal/autorepair"
+	"eling/internal/automate"
 	"eling/internal/config"
 	"eling/internal/layers"
 	"eling/internal/learnings"
@@ -112,6 +113,8 @@ func RunCLI(cfg *config.Config, version string, args []string) bool {
 		return cmdUndoVersion(cfg, subArgs)
 	case "autorepair":
 		return cmdAutorepair(cfg, subArgs)
+	case "automate":
+		return cmdAutomate(cfg, subArgs)
 	case "tools-health", "health":
 		return cmdAutorepair(cfg, subArgs)
 	case "help", "--help", "-h":
@@ -261,6 +264,15 @@ func cmdServe(cfg *config.Config, version string, args []string) bool {
 
 	srv := server.NewServer(cfg, version, agent.New)
 
+	// D4: scheduled automations — run the scheduler alongside the daemon.
+	// Stops both the scheduler's in-flight jobs and the HTTP server on ctx.
+	schedStop := func() {}
+	if cfg.Automate.Enabled {
+		sched := automate.NewScheduler(cfg, automate.NewHeadlessRunner())
+		schedStop = sched.Start(30 * time.Second)
+		log.Printf("⏰ automation scheduler started (%d jobs)", len(cfg.Automate.Jobs))
+	}
+
 	// graceful shutdown: save all sessions, then stop the http server
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -275,6 +287,7 @@ func cmdServe(cfg *config.Config, version string, args []string) bool {
 		}
 	case <-ctx.Done():
 		fmt.Println("\n⏳ shutting down daemon (saving sessions)…")
+		schedStop()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -985,6 +998,287 @@ func onOff(b bool) string {
 		return "ON"
 	}
 	return "OFF"
+}
+
+// ── Automate Commands (D4 scheduled automations) ─────────────────────────
+
+func cmdAutomate(cfg *config.Config, args []string) bool {
+	if len(args) < 1 {
+		fmt.Println("Usage: eling automate <add|list|remove|logs|enable|disable>")
+		fmt.Println("       eling automate --help for more")
+		return true
+	}
+	switch args[0] {
+	case "add":
+		return cmdAutomateAdd(cfg, args[1:])
+	case "list", "ls":
+		return cmdAutomateList(cfg)
+	case "remove", "rm":
+		return cmdAutomateRemove(cfg, args[1:])
+	case "run":
+		return cmdAutomateRun(cfg, args[1:])
+	case "enable":
+		return cmdAutomateEnable(cfg, args[1:], true)
+	case "disable":
+		return cmdAutomateEnable(cfg, args[1:], false)
+	case "logs":
+		return cmdAutomateLogs(args[1:])
+	case "enable-scheduler":
+		return cmdAutomateSet(cfg, true)
+	case "disable-scheduler":
+		return cmdAutomateSet(cfg, false)
+	case "help", "--help", "-h":
+		printAutomateHelp()
+		return true
+	default:
+		fmt.Printf("Unknown automate subcommand: %s\n", args[0])
+		printAutomateHelp()
+		return true
+	}
+}
+
+func printAutomateHelp() {
+	fmt.Println(`Usage:
+  eling automate add <name> <command|goal> --schedule "0 2 * * *"   Add a scheduled job
+  eling automate list                                              Show jobs
+  eling automate remove <name>                              Remove a job
+  eling automate run <name>                             Run a job once now
+  eling automate enable|disable <name>              Toggle a job on/off
+  eling automate enable-scheduler|disable-scheduler   Toggle the daemon scheduler
+  eling automate logs                          Show recent automation log lines
+
+  A <command> runs via /bin/sh -c. A <goal> is run through the agent.
+  Example: eling automate add nightly "go test ./..." --schedule "0 2 * * *"
+           el-ing automate add "Summarize learnings" --schedule "0 3 * * 1"`)
+}
+
+func cmdAutomateAdd(cfg *config.Config, args []string) bool {
+	if len(args) < 2 {
+		fmt.Println("Usage: eling automate add <name> '<command>|<goal>' --schedule '<cron>'")
+		return true
+	}
+	name := args[0]
+	body := args[1]
+	schedule := ""
+	kind := "command"
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--schedule", "-s":
+			if i+1 < len(args) {
+				schedule = args[i+1]
+				i++
+			}
+		case "--goal":
+			kind = "goal"
+		}
+	}
+	if schedule == "" {
+		fmt.Println("Error: --schedule \"<cron>\" is required (5 fields: min hour dom mon dow)")
+		return true
+	}
+	if _, err := automate.ParseCron(schedule); err != nil {
+		fmt.Printf("Error: invalid schedule %q: %v\n", schedule, err)
+		return true
+	}
+	// load latest cfg persisted (the running cfg may not include prior saves)
+	cfgPath := config.FindConfigPath()
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		loaded = cfg
+	}
+	for _, j := range loaded.Automate.Jobs {
+		if j.Name == name {
+			fmt.Printf("Error: job %q already exists\n", name)
+			return true
+		}
+	}
+	var job config.AutomationJob
+	if kind == "goal" {
+		job = config.AutomationJob{Name: name, Goal: body, Schedule: schedule, Enabled: true}
+	} else {
+		job = config.AutomationJob{Name: name, Command: body, Schedule: schedule, Enabled: true}
+	}
+	loaded.Automate.Jobs = append(loaded.Automate.Jobs, job)
+	if err := loaded.Save(cfgPath); err != nil {
+		fmt.Printf("Error saving config: %v\n", err)
+		return true
+	}
+	*cfg = *loaded
+	fmt.Printf("✅ automation %q added — %s, schedule %q (enabled)\n", name, jobKind(job), schedule)
+	return true
+}
+
+func cmdAutomateList(cfg *config.Config) bool {
+	cfgPath := config.FindConfigPath()
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		loaded = cfg
+	}
+	fmt.Println("⏰ Scheduled automations")
+	fmt.Println(strings.Repeat("─", 70))
+	fmt.Printf("  scheduler daemon: %s\n", onOff(loaded.Automate.Enabled))
+	if len(loaded.Automate.Jobs) == 0 {
+		fmt.Println("  No automations yet. Add one with: eling automate add <name> '<cmd|goal>' --schedule '0 2 * * *'")
+		return true
+	}
+	fmt.Printf("\n  %-18s %-10s %-7s %s\n", "Name", "Kind", "Enabled", "Schedule")
+	fmt.Println(strings.Repeat("─", 70))
+	for _, j := range loaded.Automate.Jobs {
+		fmt.Printf("  %-18s %-10s %-7s %s\n", compact(j.Name, 18), jobKind(j), onOff(j.Enabled), j.Schedule)
+	}
+	return true
+}
+
+func cmdAutomateRemove(cfg *config.Config, args []string) bool {
+	if len(args) < 1 {
+		fmt.Println("Usage: eling automate remove <name>")
+		return true
+	}
+	name := args[0]
+	cfgPath := config.FindConfigPath()
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		loaded = cfg
+	}
+	found := -1
+	for i, j := range loaded.Automate.Jobs {
+		if j.Name == name {
+			found = i
+			break
+		}
+	}
+	if found < 0 {
+		fmt.Printf("Error: no job named %q\n", name)
+		return true
+	}
+	loaded.Automate.Jobs = append(loaded.Automate.Jobs[:found], loaded.Automate.Jobs[found+1:]...)
+	if err := loaded.Save(cfgPath); err != nil {
+		fmt.Printf("Error saving config: %v\n", err)
+		return true
+	}
+	*cfg = *loaded
+	fmt.Printf("✅ automation %q removed\n", name)
+	return true
+}
+
+func cmdAutomateRun(cfg *config.Config, args []string) bool {
+	if len(args) < 1 {
+		fmt.Println("Usage: eling automate run <name>")
+		return true
+	}
+	name := args[0]
+	cfgPath := config.FindConfigPath()
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		loaded = cfg
+	}
+	for i := range loaded.Automate.Jobs {
+		if loaded.Automate.Jobs[i].Name == name {
+			job := &loaded.Automate.Jobs[i]
+			fmt.Printf("▶ running automation %q once…\n", name)
+			sched := automate.NewScheduler(loaded, nil)
+			_, runErr := sched.SyncRun(job.Name, job.Command, job.Goal)
+			ts := time.Now().Format(time.RFC3339)
+			if runErr != nil {
+				job.LastStatus = "error:" + runErr.Error()
+				job.LastRun = ts
+				fmt.Printf("❌ automation %q failed: %v\n", name, runErr)
+			} else {
+				job.LastStatus = "ok"
+				job.LastRun = ts
+				fmt.Printf("✅ automation %q completed.\n", name)
+			}
+			if err := loaded.Save(cfgPath); err != nil {
+				fmt.Printf("⚠️ could not persist status: %v\n", err)
+			}
+			return true
+		}
+	}
+	fmt.Printf("Error: no job named %q\n", name)
+	return true
+}
+
+func cmdAutomateEnable(cfg *config.Config, args []string, enable bool) bool {
+	if len(args) < 1 {
+		fmt.Println("Usage: eling automate enable|disable <name>")
+		return true
+	}
+	name := args[0]
+	cfgPath := config.FindConfigPath()
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		loaded = cfg
+	}
+	for i := range loaded.Automate.Jobs {
+		if loaded.Automate.Jobs[i].Name == name {
+			loaded.Automate.Jobs[i].Enabled = enable
+			if err := loaded.Save(cfgPath); err != nil {
+				fmt.Printf("Error saving config: %v\n", err)
+				return true
+			}
+			*cfg = *loaded
+			fmt.Printf("%s automation %q\n", map[bool]string{true: "✅ enabled", false: "⏸ disabled"}[enable], name)
+			return true
+		}
+	}
+	fmt.Printf("Error: no job named %q\n", name)
+	return true
+}
+
+func cmdAutomateSet(cfg *config.Config, enable bool) bool {
+	cfgPath := config.FindConfigPath()
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		loaded = cfg
+	}
+	loaded.Automate.Enabled = enable
+	if err := loaded.Save(cfgPath); err != nil {
+		fmt.Printf("Error saving config: %v\n", err)
+		return true
+	}
+	*cfg = *loaded
+	verb := "enabled"
+	if !enable {
+		verb = "disabled"
+	}
+	fmt.Printf("✅ daemon automation scheduler %s — restart `eling serve` to apply\n", verb)
+	return true
+}
+
+func cmdAutomateLogs(args []string) bool {
+	path := automate.LogPath()
+	tail := 40
+	if len(args) > 0 {
+		fmt.Sscanf(args[0], "%d", &tail)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("No automation log at %s yet (%v)\n", path, err)
+		return true
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > tail {
+		lines = lines[len(lines)-tail:]
+	}
+	fmt.Printf("⏰ automation log: %s (last %d lines)\n", path, len(lines))
+	for _, l := range lines {
+		fmt.Println(l)
+	}
+	return true
+}
+
+func jobKind(j config.AutomationJob) string {
+	if j.Command != "" {
+		return "command"
+	}
+	return "goal"
+}
+
+func compact(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // ── Config Commands ───────────────────────────────────────────────────────

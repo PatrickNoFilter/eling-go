@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -39,5 +41,58 @@ func TestDefaultPromptKeepsSearchRule(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "ugrep") {
 		t.Error("ugrep mandate was dropped from the default system prompt")
+	}
+}
+
+// TestAutomateConfigRoundTrip guards D4: automation jobs added via
+// `eling automate add` persist and survive a Load/Save round trip, including
+// their LastRun/LastStatus bookkeeping fields.
+func TestAutomateConfigRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	cfg.Automate.Enabled = true
+	cfg.Automate.Jobs = []AutomationJob{
+		{Name: "nightly", Command: "go test ./...", Schedule: "0 2 * * *", Enabled: true},
+		{Name: "digest", Goal: "Summarize yesterday's learnings", Schedule: "0 3 * * 1", Enabled: false},
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !got.Automate.Enabled {
+		t.Error("Automate.Enabled lost on round trip")
+	}
+	if len(got.Automate.Jobs) != 2 {
+		t.Fatalf("jobs = %d, want 2", len(got.Automate.Jobs))
+	}
+	if got.Automate.Jobs[0].Name != "nightly" || got.Automate.Jobs[0].Schedule != "0 2 * * *" {
+		t.Errorf("job0 = %+v", got.Automate.Jobs[0])
+	}
+	if got.Automate.Jobs[1].Goal == "" || got.Automate.Jobs[1].Enabled {
+		t.Errorf("job1 = %+v", got.Automate.Jobs[1])
+	}
+
+	// Backwards compatibility: a config file without an `automate:` key must
+	// load with the defaults (scheduler off, no jobs).
+	old := "agent:\n  system_prompt: \"x\"\n"
+	oldPath := filepath.Join(dir, "old.yaml")
+	if err := os.WriteFile(oldPath, []byte(old), 0600); err != nil {
+		t.Fatalf("write old: %v", err)
+	}
+	oldCfg, err := Load(oldPath)
+	if err != nil {
+		t.Fatalf("load old: %v", err)
+	}
+	if oldCfg.Automate.Enabled {
+		t.Error("old config without automate: should default to disabled")
+	}
+	if len(oldCfg.Automate.Jobs) != 0 {
+		t.Errorf("old config without automate: jobs = %d, want 0", len(oldCfg.Automate.Jobs))
 	}
 }
