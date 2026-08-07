@@ -45,6 +45,12 @@ type OutputConfig struct {
 	EndMessageNoMD bool `yaml:"end_message_no_md,omitempty"`
 }
 
+// Active reports whether any end-message output policy is enabled. A fully
+// zero block is inactive, so a fresh install preserves today's exact output.
+func (o OutputConfig) Active() bool {
+	return o.EndMessageRunes > 0 || o.EndMessageParas > 0 || o.EndMessageNoMD
+}
+
 // PermissionsConfig configures the D6 per-tool permission profiles. It lets the
 // user gate sensitive/destructive tools per project without blanket-approving
 // everything. Each tool can be `allow`, `ask` (prompt once per call in the

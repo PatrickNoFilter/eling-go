@@ -452,6 +452,32 @@ func (a *Agent) fireHook(hookName string, ctx map[string]interface{}) []interfac
 	return a.Brain.FireHook(hookName, ctx)
 }
 
+// shapeEndMessage applies the opt-in output-shaping policy to the final
+// assistant message of a completed turn (see internal/layers/shaping.go). It
+// returns the input unchanged when the policy is default/zero, so the common
+// case is a pure passthrough with zero overhead. When shaping fires, it emits
+// the end_message_produce hook for audit/observability.
+func (a *Agent) shapeEndMessage(msg string) string {
+	if a.cfg == nil || !a.cfg.Output.Active() {
+		return msg
+	}
+	before := len([]rune(msg))
+	wrap := layers.NewEndMessage(layers.EndMessagePolicy{
+		MaxRunes:         a.cfg.Output.EndMessageRunes,
+		MaxParas:         a.cfg.Output.EndMessageParas,
+		DisallowMarkdown: a.cfg.Output.EndMessageNoMD,
+	}, msg)
+	if !wrap.Shaped() {
+		return msg
+	}
+	a.fireHook(layers.HookEndMessageProduce, map[string]interface{}{
+		"before_len": before,
+		"after_len":  wrap.Used(),
+		"note":       wrap.Note(),
+	})
+	return wrap.String()
+}
+
 // SetPlanApprover atomically replaces the plan-approval callback. Safe to
 // call while a previous Ask goroutine may still be running — it waits for
 // any in-flight PlanApprover read (inside draftPlan) to finish first.
@@ -1463,6 +1489,10 @@ func (a *Agent) AskStream(ctx context.Context, prompt string, onChunk func(strin
 				TimedOut:       false,
 				Timestamp:      time.Now(),
 			})
+
+			// P1: shape the final assistant message under the output budget
+			// (opt-in; skipped entirely when the policy is default/zero).
+			fullResponse = a.shapeEndMessage(fullResponse)
 
 			a.mu.Lock()
 			_ = a.Sessions.Append(a.sessionName, "user", prompt)

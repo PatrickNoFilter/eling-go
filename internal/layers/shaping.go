@@ -41,6 +41,21 @@ func (w EndMessageWrap) String() string {
 	return w.content
 }
 
+// Shaped reports whether any policy rule actually changed the content.
+func (w EndMessageWrap) Shaped() bool {
+	return w.shaped
+}
+
+// Used reports the rune count of the shaped content (audit/telemetry).
+func (w EndMessageWrap) Used() int {
+	return w.used
+}
+
+// Note returns the audit note describing what was applied ("" if none).
+func (w EndMessageWrap) Note() string {
+	return w.note
+}
+
 const truncationTrailer = "\n… (truncated to respect output budget)"
 const paraTrailer = "\n… (paragraphs trimmed to budget)"
 
