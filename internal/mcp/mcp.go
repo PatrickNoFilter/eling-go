@@ -100,19 +100,23 @@ func (m *Manager) Connect(ctx context.Context, name, command string, args []stri
 		notifCh: make(chan Notification, 64),
 	}
 
-	// Guarantee the initialize handshake has a deadline even when the caller
-	// passes context.Background() (startup, /add mcp, /mcp_connect). A server
-	// that spawns but never answers must fail loudly instead of hanging forever.
+	// Bound the initialize handshake with a deadline, but apply it ONLY to the
+	// initialize request — never to the child process lifetime. start() spawns
+	// the process on a detached context.Background() and uses ctx only for the
+	// handshake. A process bound to a cancelling ctx would be killed the moment
+	// Connect() returns, so every later ListTools / CallTool would deadlock or
+	// fail. The server stays alive until Disconnect() → stop().
+	var handshakeCtx context.Context = ctx
 	if _, ok := ctx.Deadline(); !ok {
 		m.mu.RLock()
 		timeout := m.connectTimeout
 		m.mu.RUnlock()
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
+		handshakeCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel() // only bounds sendRequest(initialize) inside start()
 	}
 
-	if err := server.start(ctx); err != nil {
+	if err := server.start(ctx, handshakeCtx); err != nil {
 		// Record the failure so the TUI can surface it (banner, /mcp, /stats)
 		// instead of only logging to the external log stream.
 		m.mu.Lock()
@@ -205,8 +209,12 @@ func (m *Manager) ConnectError(name string) string {
 }
 
 // start launches the MCP server process and initializes it.
-func (s *Server) start(ctx context.Context) error {
-	s.cmd = exec.CommandContext(ctx, s.Command, s.Args...)
+// processCtx owns the child's lifetime (caller's context; for startup it is
+// context.Background(), so the child survives Connect). handshakeCtx bounds
+// only the initialize request — a silent server still fails loudly via the
+// connect timeout instead of hanging forever.
+func (s *Server) start(processCtx, handshakeCtx context.Context) error {
+	s.cmd = exec.CommandContext(processCtx, s.Command, s.Args...)
 
 	// Set environment
 	if s.Env != nil {
@@ -261,7 +269,7 @@ func (s *Server) start(ctx context.Context) error {
 	go s.readResponses()
 
 	// Initialize with MCP protocol
-	initResp, err := s.sendRequest(ctx, "initialize", map[string]interface{}{
+	initResp, err := s.sendRequest(handshakeCtx, "initialize", map[string]interface{}{
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]interface{}{},
 		"clientInfo": map[string]interface{}{

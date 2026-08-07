@@ -42,6 +42,104 @@ func TestHelperMCPServer(t *testing.T) {
 	os.Exit(0)
 }
 
+// TestHelperMCPFull is a fake MCP server that answers initialize, tools/list,
+// and tools/call — enough to exercise the post-connect ListTools/CallTool path.
+// It idles until stdin closes, like a real long-lived server.
+func TestHelperMCPFull(t *testing.T) {
+	if os.Getenv("MCP_HELPER_FULL") != "1" {
+		return
+	}
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal([]byte(sc.Text()), &req); err != nil {
+			continue
+		}
+		switch req.Method {
+		case "initialize":
+			resp := map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result": map[string]interface{}{
+					"protocolVersion": "2024-11-05",
+					"capabilities":    map[string]interface{}{},
+					"serverInfo":      map[string]interface{}{"name": "fake-full", "version": "1.0.0"},
+				},
+			}
+			b, _ := json.Marshal(resp)
+			fmt.Println(string(b))
+		case "tools/list":
+			resp := map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result": map[string]interface{}{
+					"tools": []map[string]interface{}{
+						{"name": "echo", "description": "echo back"},
+						{"name": "add", "description": "add two ints"},
+					},
+				},
+			}
+			b, _ := json.Marshal(resp)
+			fmt.Println(string(b))
+		case "tools/call":
+			result, _ := json.Marshal(map[string]interface{}{
+				"content": []map[string]interface{}{{"type": "text", "text": "pong"}},
+			})
+			resp := map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  json.RawMessage(result),
+			}
+			b, _ := json.Marshal(resp)
+			fmt.Println(string(b))
+		}
+	}
+	os.Exit(0)
+}
+
+// TestHelperFullAlive verifies the long-lived server process stays alive after
+// Connect returns, i.e. that ListTools and CallTool work post-connect. This is
+// a regression test for the bug where Connect()'s handshake timeout context was
+// passed to exec.CommandContext, killing the child the moment Connect returned
+// (making every later ListTools/CallTool deadlock or fail).
+func TestHelperFullAlive(t *testing.T) {
+	m := NewManager()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary: %v", err)
+	}
+	if err := m.Connect(context.Background(), "full", exe,
+		[]string{"-test.run=TestHelperMCPFull"}, map[string]string{"MCP_HELPER_FULL": "1"}); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer m.Disconnect("full")
+
+	// Give the child a moment to be fully up (not needed for correctness, but
+	// proves the handshake-timeout cancel did not kill it).
+	time.Sleep(100 * time.Millisecond)
+
+	tools, err := m.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools after Connect failed: %v", err)
+	}
+	ts := tools["full"]
+	if len(ts) != 2 {
+		t.Fatalf("ListTools('full') = %d tools, want 2", len(ts))
+	}
+
+	res, err := m.CallTool(context.Background(), "full", "echo", map[string]interface{}{"text": "hi"})
+	if err != nil {
+		t.Fatalf("CallTool after Connect failed: %v", err)
+	}
+	if res.IsError || len(res.Content) == 0 || res.Content[0].Text != "pong" {
+		t.Fatalf("CallTool result unexpected; want pong, got IsError=%v content=%+v", res.IsError, res.Content)
+	}
+}
+
 // TestConnectSuccessHandshake verifies a server that answers initialize
 // connects, appears in List(), and records no failure.
 func TestConnectSuccessHandshake(t *testing.T) {
