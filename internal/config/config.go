@@ -25,6 +25,7 @@ type Config struct {
 	Verify     VerifyConfig     `yaml:"verify"`
 	Automate   AutomateConfig   `yaml:"automate"`
 	Permissions  PermissionsConfig `yaml:"permissions"`
+	Agents     AgentsConfig     `yaml:"agents"`
 }
 
 // PermissionsConfig configures the D6 per-tool permission profiles. It lets the
@@ -45,11 +46,26 @@ type PermissionRule struct {
 	Mode string `yaml:"mode"`
 }
 
-// Active reports whether any permission policy has been configured. A fully
+// Active reports whether any permission policy has been enabled. A fully
 // empty block is inactive (inherits the historical allow-everything behavior),
 // so a fresh install sees no surprise gates.
 func (p PermissionsConfig) Active() bool {
 	return p.Default != "" || len(p.Rules) > 0 || len(p.Projects) > 0
+}
+
+// AgentsConfig configures the D3 multi-agent parallelism subsystem. It is
+// GATED and DEFAULT OFF: parallel sub-agents only engage when Enabled is true.
+// When enabled, a job may be split into up to Max (default 2) focused
+// sub-agents that each work in their OWN isolated git worktree, so their edits
+// never collide on the real tree. Changes are merged only through an explicit
+// review report — same-file overlapping edits surface as a conflict diff and
+// are never auto-resolved (no silent merge). TokenBudget caps the per-agent
+// API budget to protect a free-tier quota when running in parallel.
+type AgentsConfig struct {
+	Enabled      bool   `yaml:"enabled"`       // parallel sub-agents gate (default off)
+	Max          int    `yaml:"max"`          // max concurrent sub-agents (0 = default 2)
+	Token        int    `yaml:"token_budget"` // per-sub-agent token budget cap (0 = unlimited)
+	WorktreeRoot string `yaml:"worktree_root"` // override for ~/.eling/worktrees (test/CI)
 }
 
 // AutomateConfig configures the D4 scheduled-automations subsystem. When
@@ -300,6 +316,11 @@ func DefaultConfig() *Config {
 			Jobs:    []AutomationJob{}, // no jobs until added
 		},
 		Permissions: PermissionsConfig{}, // empty => inactive: historical allow behavior preserved (D6)
+		Agents: AgentsConfig{
+			Enabled: false, // parallel sub-agents OFF by default until battle-tested (D3)
+			Max:     2,     // bounded 2-agent split when enabled
+			Token:   0,     // 0 = no per-agent token cap
+		},
 	}
 }
 
