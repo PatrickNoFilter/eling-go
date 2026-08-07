@@ -77,7 +77,23 @@ type Registry struct {
 	// They stay registered in memory — SetDisabled(false) re-enables them
 	// without losing the definition (manual re-enable path).
 	disabled map[string]bool
+
+	// perm is the D6 per-tool permission policy. Empty/inactive => everything
+	// is allowed (historical behavior). projectDir is the working directory
+	// used to resolve project trust levels.
+	perm        PermPolicy
+	projectDir  string
+	// gate, when non-nil, is consulted for every tool whose resolved mode is
+	// PermAsk. A nil gate degrades "ask" to "allow" (safe in headless runs —
+	// serve, --run, automate — where no human is present to answer a prompt).
+	// The gate is invoked exactly once per ExecuteContext call.
+	gate PermissionGate
 }
+
+// PermissionGate inspects a single tool call whose resolved mode is "ask" and
+// decides whether to allow it. Returning true runs the tool; false blocks it
+// with a "denied at ask prompt" error. Errors are treated as blocks.
+type PermissionGate func(name string, args map[string]interface{}) (bool, error)
 
 // NewRegistry creates a new tool registry and registers built-in tools.
 func NewRegistry() *Registry {
@@ -89,6 +105,39 @@ func NewRegistry() *Registry {
 	}
 	r.registerBuiltins()
 	return r
+}
+
+// SetPermissions installs the D6 per-tool permission policy. projectDir is the
+// working directory used to resolve project trust; pass "" when unknown.
+// Passing an empty policy disables gating entirely (historical behavior).
+func (r *Registry) SetPermissions(p PermPolicy, projectDir string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.perm = p
+	r.projectDir = projectDir
+}
+
+// SetPermissionGate installs the interactive "ask" prompt handler. When nil,
+// tools whose resolved mode is "ask" run without prompting (headless-safe).
+func (r *Registry) SetPermissionGate(g PermissionGate) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gate = g
+}
+
+// PermissionModeFor resolves the permission mode for a tool call without
+// executing it. Useful for CLI introspection (`eling permission list`).
+func (r *Registry) PermissionModeFor(name string) (mode, reason string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.perm.ModeFor(name, r.projectDir)
+}
+
+// PermissionPolicy returns the currently installed policy (for introspection).
+func (r *Registry) PermissionPolicy() PermPolicy {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.perm
 }
 
 // SetDisabled marks a tool disabled (quarantined) or re-enabled. Disabled tools
@@ -289,6 +338,31 @@ func (r *Registry) ExecuteContext(ctx context.Context, name string, args map[str
 	}
 	if dis {
 		return nil, fmt.Errorf("tool %q is disabled (quarantined); re-enable with `eling autorepair reenable %s`", name, name)
+	}
+
+	// D6: per-tool permission gate. Runs before dispatch so a "deny" call is
+	// blocked without ever entering the tool, and an "ask" call can prompt the
+	// user via the interactive gate (installed by the CLI; nil here in headless
+	// runs degrades "ask" to "allow"). The empty/inactive policy yields
+	// "allow" for every tool, so a fresh install is unaffected.
+	if mode, reason := r.perm.ModeFor(name, r.projectDir); mode != PermAllow {
+		if mode == PermDeny {
+			return nil, fmt.Errorf("tool %q blocked by permission policy (%s); adjust with `eling permission set %s allow`", name, reason, name)
+		}
+		// PermAsk: consult the gate (if any). Exactly one call per execution.
+		r.mu.RLock()
+		g := r.gate
+		r.mu.RUnlock()
+		if g != nil {
+			ok, gerr := g(name, args)
+			if gerr != nil {
+				return nil, fmt.Errorf("tool %q permission gate error: %v", name, gerr)
+			}
+			if !ok {
+				return nil, fmt.Errorf("tool %q blocked by permission policy (%s; denied at ask prompt)", name, reason)
+			}
+		}
+		// nil gate -> run (headless-safe, preserves behavior).
 	}
 
 	start := time.Now()

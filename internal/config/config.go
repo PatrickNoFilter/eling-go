@@ -24,6 +24,32 @@ type Config struct {
 	Autorepair AutorepairConfig `yaml:"autorepair"`
 	Verify     VerifyConfig     `yaml:"verify"`
 	Automate   AutomateConfig   `yaml:"automate"`
+	Permissions  PermissionsConfig `yaml:"permissions"`
+}
+
+// PermissionsConfig configures the D6 per-tool permission profiles. It lets the
+// user gate sensitive/destructive tools per project without blanket-approving
+// everything. Each tool can be `allow`, `ask` (prompt once per call in the
+// TUI), or `deny`; projects can carry a trust level. When the whole block is
+// empty (fresh config) the policy is inactive and current behavior is
+// preserved (no gates). When active, unlisted tools resolve to Default.
+type PermissionsConfig struct {
+	Default  string            `yaml:"default,omitempty"`  // "allow" | "ask" | "deny" for unlisted tools
+	Rules    []PermissionRule  `yaml:"rules,omitempty"`    // per-tool overrides
+	Projects map[string]string `yaml:"projects,omitempty"` // abs project path -> "full" | "ask" | "deny"
+}
+
+// PermissionRule pins one tool to a mode. Mode is one of allow / ask / deny.
+type PermissionRule struct {
+	Tool string `yaml:"tool"`
+	Mode string `yaml:"mode"`
+}
+
+// Active reports whether any permission policy has been configured. A fully
+// empty block is inactive (inherits the historical allow-everything behavior),
+// so a fresh install sees no surprise gates.
+func (p PermissionsConfig) Active() bool {
+	return p.Default != "" || len(p.Rules) > 0 || len(p.Projects) > 0
 }
 
 // AutomateConfig configures the D4 scheduled-automations subsystem. When
@@ -273,6 +299,7 @@ func DefaultConfig() *Config {
 			Enabled: false,         // scheduler OFF by default (D4)
 			Jobs:    []AutomationJob{}, // no jobs until added
 		},
+		Permissions: PermissionsConfig{}, // empty => inactive: historical allow behavior preserved (D6)
 	}
 }
 
