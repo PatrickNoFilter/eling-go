@@ -50,6 +50,7 @@ var (
 	reasonSty    = lipgloss.NewStyle().Foreground(lipgloss.Color("#89B4FA")).Italic(true) // blue italic for reasoning
 	resultSty    = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))              // white for tool results
 	planSty      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#CBA6F7"))   // lavender bold for plan header
+	permSty      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F9E2AF"))   // yellow bold for permission ask
 	diffAddSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6E3A1"))              // green for added lines
 	diffDelSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F38BA8"))              // red for deleted lines
 	diffHdrSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("#89B4FA"))              // blue for diff header
@@ -67,6 +68,14 @@ type errMsg string
 // planMsg carries a drafted execution plan from the Ask goroutine so the
 // TUI can render it as a checklist and prompt for y/N/Esc approval.
 type planMsg string
+
+// permAskMsg signals that a tool whose permission mode is "ask" is about to
+// run, so the TUI can prompt for a one-time y/N verdict over ch (blocking the
+// Ask goroutine meanwhile, mirroring the plan approver).
+type permAskMsg struct {
+	name string
+	ch   chan bool
+}
 
 // toolCallMsg is sent from the Ask goroutine to signal a tool invocation.
 type toolCallMsg agent.ToolCallEvent
@@ -118,6 +127,9 @@ type Model struct {
 	pasteUntil      time.Time              // pasting stays true until this time
 	awaitingPlan    bool                   // true while a drafted plan is waiting for y/N/Esc approval
 	planCh          chan agent.PlanVerdict // receives the user's plan verdict (non-nil only while awaitingPlan)
+	awaitingPerm    bool                   // true while a per-tool permission ask awaits y/N (D6)
+	permCh          chan bool              // receives the user's decision (non-nil only while awaitingPerm)
+	permPrompt      string                 // tool name being gated, for the footer prompt
 }
 
 // NewProgram creates a new Bubbletea program with the given agent and timezone location.
@@ -449,6 +461,64 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// While a D6 permission ask is awaiting a y/N verdict, intercept the
+		// keys. The Ask goroutine is blocked on permCh until the user decides;
+		// Enter/`y` allow this one call, `n`/Esc deny it, Ctrl+C cancels.
+		if m.awaitingPerm {
+			decided := false
+			allowed := false
+			switch v.Type {
+			case tea.KeyEnter:
+				decided = true
+				allowed = true
+			case tea.KeyEsc:
+				decided = true
+				allowed = false
+			case tea.KeyCtrlC:
+				decided = true
+				allowed = false
+				if m.cancel != nil {
+					m.cancel()
+				}
+			case tea.KeyRunes:
+				s := strings.ToLower(string(v.Runes))
+				switch s {
+				case "y", "yes":
+					decided = true
+					allowed = true
+				case "n", "no":
+					decided = true
+					allowed = false
+				}
+			}
+			if decided {
+				toolName := m.permPrompt
+				m.awaitingPerm = false
+				ch := m.permCh
+				m.permCh = nil
+				m.permPrompt = ""
+				label := "⛔ denied"
+				if allowed {
+					label = "✓ allowed"
+				}
+				m.messages = append(m.messages, dimSty.Render(fmt.Sprintf("  🔒 %s %s (permission ask)", label, toolName)))
+				if ch != nil {
+					select {
+					case ch <- allowed:
+					default:
+					}
+				}
+				if m.ready {
+					wasAtBottom := m.vp.ScrollPercent() >= 0.99
+					m.vp.SetContent(strings.Join(m.messages, "\n"))
+					if wasAtBottom {
+						m.vp.GotoBottom()
+					}
+				}
+			}
+			return m, nil
+		}
+
 		// Scroll keys work even during loading
 		if m.loading {
 			if v.Type == tea.KeyCtrlC && m.cancel != nil {
@@ -767,12 +837,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case permAskMsg:
+		// A tool with permission mode "ask" is about to run. Show the prompt
+		// and wait for y/N — the Ask goroutine is blocked on v.ch meanwhile.
+		m.awaitingPerm = true
+		m.permCh = v.ch
+		m.permPrompt = v.name
+		m.messages = append(m.messages, permSty.Render(fmt.Sprintf("🔒 Allow tool %q for this call?  [y] allow   [n] deny   [Esc] deny   [Ctrl+C] cancel", v.name)))
+		if m.ready {
+			wasAtBottom := m.vp.ScrollPercent() >= 0.99
+			m.vp.SetContent(strings.Join(m.messages, "\n"))
+			if wasAtBottom {
+				m.vp.GotoBottom()
+			}
+		}
+		return m, nil
+
 	case respMsg:
 		m.loading = false
 		m.cancel = nil // reset cancel function
 		m.awaitingPlan = false
 		m.planCh = nil
-		// Remove the thinking line cleanly
+		m.awaitingPerm = false
+		m.permCh = nil
+		m.permPrompt = ""
+
 		m.messages = removeLine(m.messages, m.thinkingIdx)
 		m.thinkingIdx = -1
 		elapsed := time.Since(m.startTime)
@@ -792,6 +881,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancel = nil // reset cancel function
 		m.awaitingPlan = false
 		m.planCh = nil
+		m.awaitingPerm = false
+		m.permCh = nil
+		m.permPrompt = ""
 		m.messages = removeLine(m.messages, m.thinkingIdx)
 		m.thinkingIdx = -1
 		elapsed := time.Since(m.startTime)
@@ -903,6 +995,26 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	// counter so stale messages from old goroutines can be detected and dropped.
 	go func() {
 		defer cancel()
+		// D6: install a per-submit interactive ask-gate. When a tool whose
+		// permission mode is "ask" is about to run, the gate prompts the TUI
+		// once per gated call (mirroring the plan approver above). Deferred
+		// clear guarantees the registry never holds a stale gate pointing at
+		// this goroutine's dead channel after return or cancellation.
+		permCh := make(chan bool, 1)
+		tools.DefaultRegistry.SetPermissionGate(func(name string, args map[string]interface{}) (bool, error) {
+			select {
+			case msgCh <- genMsg{gen: myGen, msg: permAskMsg{name: name, ch: permCh}}:
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+			select {
+			case ok := <-permCh:
+				return ok, nil
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+		})
+		defer tools.DefaultRegistry.SetPermissionGate(nil)
 		r, e := ag.Ask(ctx, text, func(evt agent.ToolCallEvent) {
 			select {
 			case msgCh <- genMsg{gen: myGen, msg: toolCallMsg(evt)}:
@@ -1462,8 +1574,11 @@ func (m Model) View() string {
 		hint = dimSty.Render("  multiline input — Enter to send")
 	}
 	hintLine := ""
+	if m.awaitingPerm {
+		hintLine = permSty.Render(fmt.Sprintf("  🔒 allow %q for this call? [y] allow  [n] deny  [Esc] deny  [Ctrl+C] cancel", m.permPrompt)) + "\n"
+	}
 	if hint != "" {
-		hintLine = hint + "\n"
+		hintLine += hint + "\n"
 	}
 	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s%s", banner, header, body, agentLabel, hintLine, input)
 }
