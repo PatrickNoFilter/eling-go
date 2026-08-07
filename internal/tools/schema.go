@@ -235,6 +235,89 @@ var paramSchemas = map[string]map[string]interface{}{
 		"type":       "object",
 		"properties": map[string]interface{}{},
 	},
+	// cbm_* tools are dynamic CLI wrappers around the codebase-memory-mcp
+	// binary. RunDynamicCommand maps every call argument to an ELING_ARG_*
+	// env var, so the schema declared here must mirror the $ELING_ARG_*
+	// variables used inside the wrapper command in state/tools.json.
+	"cbm_index_repository": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"repo_path": map[string]interface{}{"type": "string", "description": "Absolute path of the repository to index into the codebase-memory knowledge graph."},
+		},
+		"required": []string{"repo_path"},
+	},
+	"cbm_list_projects": {
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	},
+	"cbm_search_graph": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"project":       map[string]interface{}{"type": "string", "description": "Project name (from list_projects)."},
+			"name_pattern":  map[string]interface{}{"type": "string", "description": "Regex to match symbol names (optional)."},
+			"label":         map[string]interface{}{"type": "string", "description": "Node label filter, e.g. Function/Class/Route (optional)."},
+			"limit":         map[string]interface{}{"type": "number", "description": "Max results (default 20)."},
+			"offset":        map[string]interface{}{"type": "number", "description": "Pagination offset (optional)."},
+		},
+		"required": []string{"project"},
+	},
+	"cbm_trace_path": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"project":       map[string]interface{}{"type": "string", "description": "Project name (from list_projects)."},
+			"function_name": map[string]interface{}{"type": "string", "description": "Exact function name to trace."},
+			"direction":     map[string]interface{}{"type": "string", "description": "inbound / outbound / both (default both)."},
+			"depth":         map[string]interface{}{"type": "number", "description": "Call depth 1-5 (default 3)."},
+		},
+		"required": []string{"project", "function_name"},
+	},
+	"cbm_query_graph": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"project": map[string]interface{}{"type": "string", "description": "Project name (from list_projects)."},
+			"query":   map[string]interface{}{"type": "string", "description": "Cypher-like graph query string."},
+		},
+		"required": []string{"project", "query"},
+	},
+	"cbm_get_architecture": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"project": map[string]interface{}{"type": "string", "description": "Project name (from list_projects)."},
+		},
+		"required": []string{"project"},
+	},
+	"cbm_get_code_snippet": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"project":        map[string]interface{}{"type": "string", "description": "Project name (from list_projects)."},
+			"qualified_name": map[string]interface{}{"type": "string", "description": "Qualified symbol name, e.g. myproject.src.utils.helper_function."},
+		},
+		"required": []string{"project", "qualified_name"},
+	},
+	"cbm_search_code": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"project": map[string]interface{}{"type": "string", "description": "Project name (from list_projects)."},
+			"query":   map[string]interface{}{"type": "string", "description": "Text to search for in indexed project files."},
+			"pattern": map[string]interface{}{"type": "string", "description": "Optional regex pattern."},
+		},
+		"required": []string{"project", "query"},
+	},
+	"cbm_get_graph_schema": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"project": map[string]interface{}{"type": "string", "description": "Project name (from list_projects)."},
+		},
+		"required": []string{"project"},
+	},
+	"cbm_detect_changes": {
+		"type": "object",
+		"properties": map[string]interface{}{
+			"project":  map[string]interface{}{"type": "string", "description": "Project name (from list_projects)."},
+			"repo_path": map[string]interface{}{"type": "string", "description": "Absolute repo path (optional)."},
+		},
+		"required": []string{"project"},
+	},
 }
 
 // defaultSchema is used for any tool with no explicit schema above.

@@ -53,6 +53,37 @@ func TestToProviderDefsRespectsAllowlist(t *testing.T) {
 	}
 }
 
+// TestCBMProjectParamAdvertised guards against the "project not found" bug:
+// cbm_* dynamic tools must advertise their required "project" parameter in the
+// provider schema, otherwise the LLM never passes it and ELING_ARG_PROJECT
+// stays empty. See schema.go paramSchemas where the cbm_* schemas live.
+func TestCBMProjectParamAdvertised(t *testing.T) {
+	os.Unsetenv("ELING_TOOLS")
+
+	r := NewRegistry()
+	r.Register(Tool{Name: "cbm_search_graph", Description: "search the graph"})
+	r.Register(Tool{Name: "cbm_trace_path", Description: "trace a path"})
+	r.Register(Tool{Name: "cbm_get_architecture", Description: "get architecture"})
+	defs := r.ToProviderDefs()
+
+	got := map[string]bool{}
+	for _, d := range defs {
+		fn, ok := d.Function.Parameters.(map[string]interface{})
+		if !ok {
+			t.Fatalf("tool %q: Parameters not a map: %T", d.Function.Name, d.Function.Parameters)
+		}
+		props, _ := fn["properties"].(map[string]interface{})
+		_, hasProject := props["project"]
+		got[d.Function.Name] = hasProject
+	}
+
+	for _, name := range []string{"cbm_search_graph", "cbm_trace_path", "cbm_get_architecture"} {
+		if !got[name] {
+			t.Errorf("tool %q does not advertise a 'project' parameter (%v)", name, got)
+		}
+	}
+}
+
 // TestToProviderDefsSkipsNoop verifies the P1.6 regression guard: placeholder
 // tools (learned-skill stubs, no-command dynamic tools) marked Noop are never
 // advertised to the LLM, so the tool surface cannot be re-polluted by no-ops.
