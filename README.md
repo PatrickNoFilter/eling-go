@@ -582,7 +582,9 @@ echo "$ctx" | grep -q '"tool_name":"edit"' && (cd /root/eling && go vet ./... >/
 
 ## 🔧 Provider Setup
 
-> **v0.7.0:** Codebase-memory (`cbm_*`) tools now advertise required params (`project`, `query`, `repo_path`, …) in the provider schema, mirroring the `*` env-var arguments their wrappers expect — fixing the `project not found` class of bug where the LLM never sent the required `project`/`query` arg. Adds `TestCBMProjectParamAdvertised` as a regression guard.
+> **v0.7.1:** MCP server fixes — `mcp/srv.NewServer` now assigns a real `stdout` (it defaulted to nil, so the server could never answer an initialize handshake, seen as `context deadline exceeded` / empty client stdout), and `mcp.NewManager.Connect` now keeps the MCP server child process alive after `Connect` returns so spawned `elling --mcp` servers don't die on the first client. Fixes MCP client/server connectivity end-to-end.
+
+> **v0.7.0:** Codebase-memory (`cbm_*`) tools now advertise required params (`project`, `query`, `repo_path`, …) in the provider schema, mirroring the `*` env-var arguments their wrappers expect — fixing the `project not found` class of bug where the agent never sent the required `project`/`query` arg. Adds `TestCBMProjectParamAdvertised` as a regression guard.
 
 > **v0.6.0:** Session resource budget — configurable `session.max_duration_sec` / `session.max_turns` / `session.idle_timeout_sec` (default all `0 = off`) enforced across the **REPL and TUI** (root deadline, per-turn bucket, idle stopwatch), with auto-save on idle/turn-limit exit, a `/budget` slash command, config CLI keys, and an `ELING_SESSION_MAX_DURATION_SEC` env override for unattended `automate`/`benchmark` runs. See `docs/session.md` and `sessionbudget.md`.
 
