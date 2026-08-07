@@ -590,10 +590,10 @@ already ✅ above. **A6 ✅ (2026-08-03, lsp_rename tool + applyEdit safety net)
 | D3 | **Multi-agent parallelism in isolated worktrees** (conflict-surfaced) | ⏳ | M | 🔥🔥 | `internal/tools/worktree.go` (Phase 1 infra exists); SubAgents deferred since Part I |
 | D4 | **Scheduled automations** (`eling automate add … --schedule`) | ✅ 2026-08-07 | M | 🔥🔥 | `internal/automate/automate.go` (new: cron parse + overlap-guarded Scheduler); `cli.go` `eling automate …`; `config.go` `automate.jobs[]`; daemon starts scheduler when enabled |
 | D5 | **Evidence taxonomy per task type** | ✅ 2026-08-06 (via D2) | — | 🔥 | `internal/verify/evidence.go` selector — Go → `go test ./...`/`go vet`/LSP, docs → diff; **folded into D2** (not standalone) |
-| D6 | **Per-tool permission profiles** (allow/ask/deny + project trust) | ⏳ | M | 🔥 | plan mode (`--plan`); sandbox `guard_mode`; no per-tool trust zones |
+| D6 | **Per-tool permission profiles** (allow/ask/deny + project trust) | ✅ 2026-08-07 | M | 🔥 | `internal/tools/permissions.go` (policy + resolution), `internal/config` `permissions` block, `eling permission …` CLI, TUI interactive ask-gate per call |
 | D7 | **Atomic commit discipline** (conventional commits + build/test gate) | ✅ 2026-08-06 | XS | 🔥 | default system prompt: only the SEARCH RULE — no commit-workflow rule |
 
-**Suggested sprint:** D1 ✅ → **D7 (XS quick win)** ✅ → D2 ✅ → D4 ✅ → D6 → D3 (quick wins first; D3 last — highest risk, gated). **Remaining:** D6 → D3.
+**Suggested sprint:** D1 ✅ → **D7 (XS quick win)** ✅ → D2 ✅ → D4 ✅ → D6 ✅ → D3 (quick wins first; D3 last — highest risk, gated). **Remaining:** D3.
 
 ---
 
@@ -757,7 +757,7 @@ inside D2's `evidence.go`.
 
 ---
 
-### D6 — Per-tool permission profiles (allow/ask/deny + project trust)  `[candidate — Phase 5, M]`
+### D6 — Per-tool permission profiles (allow/ask/deny + project trust)  `[✅ DONE 2026-08-07]`
 
 **What DeepCode does:** per-tool permission levels (allow/ask/deny) and per-project trust, so
 destructive or sensitive tools are gated without blanket-approving everything.
@@ -776,6 +776,20 @@ There's no way to say "bash: ask, but read/write/edit: allow" per project.
 
 **Files touched:** `internal/config/config.go`, `internal/tools/registry.go`, `internal/tui/tui.go`
 (ask gate), `internal/tools/permissions_test.go` (new).
+
+**Implemented (2026-08-07):**
+- `internal/tools/permissions.go` — `PermPolicy` model + resolution. Exact tool rule > longest-prefix
+  project trust > default. A fully-empty policy is `inactive` (all tools allowed — fresh install
+  behaviour unchanged). `NewPermPolicy` / `ValidPermMode` / `ModeFor`.
+- `registry.go` — `SetPermissions` / `SetPermissionGate` / `PermissionModeFor` / `PermissionPolicy`;
+  `ExecuteContext` gates before dispatch under `RLock` (deny → blocked error; ask → consults the
+  gate once per call; nil gate degrades ask→allow for headless/serve/automate; allow → runs with
+  sandbox still applied).
+- `config.go` — `permissions { default, rules[], projects{} }` block, `Active()`.
+- CLI — `eling permission list|set|unset|set-default|project|reset` (persists to `eling.yml`).
+- TUI — per-call `ask` gate: `permAskMsg` mirrors the plan approver; y/N/Esc/Ctrl+C verdict logged;
+  gate installed per submit and cleared on return/cancel.
+- 9 unit tests in `internal/tools/permissions_test.go`.
 
 **Acceptance:**
 - [ ] `deny` on `bash` blocks with a reason; `allow` on `write` skips the gate
