@@ -282,6 +282,10 @@ func New(cfg *config.Config) (*Agent, error) {
 
 	sesMgr := session.NewManager(cfg.Session.SaveDir)
 	mcpMgr := mcp.NewManager()
+	// MCP handshake timeout from config: a server that starts but never answers
+	// the initialize handshake must fail loudly (visible in /stats, /mcp, banner)
+	// instead of blocking startup forever.
+	mcpMgr.SetConnectTimeout(cfg.MCP.ConnectTimeout)
 
 	a := &Agent{
 		cfg:             cfg,
@@ -2006,7 +2010,8 @@ func (a *Agent) GetStats() map[string]interface{} {
 		"learnings":         len(a.learnings),
 		"tools_available":   a.ToolRegistry.Count(),
 		"mcp_servers":       len(mcpServers),
-		"mcp_tools":         0,
+		"mcp_failures":     len(a.MCP.Failures()),
+		"mcp_tools":        0,
 		"model":             a.cfg.Agent.DefaultModel,
 		"session":           a.sessionName,
 		"token_budget":      a.cfg.Agent.MaxContext,

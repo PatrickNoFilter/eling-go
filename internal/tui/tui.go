@@ -1386,6 +1386,13 @@ func (m Model) cmd(c string) (tea.Model, tea.Cmd) {
 				m.messages = append(m.messages, fmt.Sprintf("  - %s", s))
 			}
 		}
+		// Surface failed connects (startup or live) instead of hiding them.
+		if fails := m.agent.MCP.Failures(); len(fails) > 0 {
+			m.messages = append(m.messages, errSty.Render("  failed connects:"))
+			for name, err := range fails {
+				m.messages = append(m.messages, errSty.Render(fmt.Sprintf("  ✗ %s: %s", name, err)))
+			}
+		}
 
 	// --- /mcp_connect <name> <cmd...> ---
 	case "/mcp_connect":
@@ -1521,6 +1528,11 @@ func (m Model) View() string {
 	qcount := autorepair.CountQuarantined()
 	head := fmt.Sprintf(" %s%s  mem %d  mcp %d  tls %d  skl %d  %s",
 		clock, elapsedStr, s["memory_items"], s["mcp_servers"], s["tools_available"], s["learned_skills"], sandboxStr)
+	// Surface MCP connect failures (e.g. startup handshake timeouts) in the
+	// header instead of hiding them behind an external log line.
+	if n, ok := s["mcp_failures"].(int); ok && n > 0 {
+		head += fmt.Sprintf("  ⚠️ mcp✗ %d", n)
+	}
 	if qcount > 0 {
 		head += fmt.Sprintf("  ⚠️ q %d", qcount)
 		if qrecs := autorepair.QuarantinedTools(); len(qrecs) > 0 {

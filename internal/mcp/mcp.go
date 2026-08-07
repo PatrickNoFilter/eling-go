@@ -11,9 +11,14 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"eling/internal/logger"
 )
+
+// DefaultConnectTimeout caps the initialize handshake so a server that starts
+// but never answers cannot hang Connect (or startup) forever.
+const DefaultConnectTimeout = 5 * time.Second
 
 // Tool represents an MCP tool.
 type Tool struct {
@@ -57,15 +62,30 @@ type Server struct {
 
 // Manager manages multiple MCP server connections.
 type Manager struct {
-	mu      sync.RWMutex
-	servers map[string]*Server
+	mu             sync.RWMutex
+	servers        map[string]*Server
+	connErr        map[string]string // last connect error per server name (surfaced in /mcp, /stats, banner)
+	connectTimeout time.Duration     // hard cap on the initialize handshake
 }
 
 // NewManager creates a new MCP manager.
 func NewManager() *Manager {
 	return &Manager{
-		servers: make(map[string]*Server),
+		servers:        make(map[string]*Server),
+		connErr:        make(map[string]string),
+		connectTimeout: DefaultConnectTimeout,
 	}
+}
+
+// SetConnectTimeout overrides the initialize-handshake timeout.
+// Values <= 0 keep the current (default 5s) timeout.
+func (m *Manager) SetConnectTimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	m.mu.Lock()
+	m.connectTimeout = d
+	m.mu.Unlock()
 }
 
 // Connect starts and initializes an MCP server via stdio.
@@ -80,12 +100,30 @@ func (m *Manager) Connect(ctx context.Context, name, command string, args []stri
 		notifCh: make(chan Notification, 64),
 	}
 
+	// Guarantee the initialize handshake has a deadline even when the caller
+	// passes context.Background() (startup, /add mcp, /mcp_connect). A server
+	// that spawns but never answers must fail loudly instead of hanging forever.
+	if _, ok := ctx.Deadline(); !ok {
+		m.mu.RLock()
+		timeout := m.connectTimeout
+		m.mu.RUnlock()
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
 	if err := server.start(ctx); err != nil {
+		// Record the failure so the TUI can surface it (banner, /mcp, /stats)
+		// instead of only logging to the external log stream.
+		m.mu.Lock()
+		m.connErr[name] = err.Error()
+		m.mu.Unlock()
 		return fmt.Errorf("start MCP server %s: %w", name, err)
 	}
 
 	m.mu.Lock()
 	m.servers[name] = server
+	delete(m.connErr, name)
 	m.mu.Unlock()
 	return nil
 }
@@ -144,6 +182,26 @@ func (m *Manager) List() []string {
 		names = append(names, n)
 	}
 	return names
+}
+
+// Failures returns the last connect error per server name for servers that
+// failed to start or initialize. Safe to call from the TUI banner hot path.
+func (m *Manager) Failures() map[string]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make(map[string]string, len(m.connErr))
+	for n, e := range m.connErr {
+		out[n] = e
+	}
+	return out
+}
+
+// ConnectError returns the last connect error for a named server, or "".
+func (m *Manager) ConnectError(name string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.connErr[name]
 }
 
 // start launches the MCP server process and initializes it.

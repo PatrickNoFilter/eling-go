@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -169,8 +170,9 @@ type MemoryConfig struct {
 
 // MCPConfig configures MCP servers.
 type MCPConfig struct {
-	Enabled bool              `yaml:"enabled"`
-	Servers []MCPServerConfig `yaml:"servers"`
+	Enabled        bool              `yaml:"enabled"`
+	Servers        []MCPServerConfig `yaml:"servers"`
+	ConnectTimeout time.Duration     `yaml:"connect_timeout"` // initialize-handshake cap; 0 = default (5s)
 }
 
 // MCPServerConfig configures a single MCP server.
@@ -272,8 +274,9 @@ func DefaultConfig() *Config {
 			DecayRate:    0.01,
 		},
 		MCP: MCPConfig{
-			Enabled: false,
-			Servers: []MCPServerConfig{},
+			Enabled:        false,
+			Servers:        []MCPServerConfig{},
+			ConnectTimeout: 5 * time.Second,
 		},
 		LSP: LSPConfig{
 			Enabled: true,
