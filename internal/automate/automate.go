@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"eling/internal/agent"
+	"eling/internal/budget"
 	"eling/internal/config"
 )
 
@@ -243,7 +244,10 @@ func runAgent(ctx context.Context, goal string) (string, error) {
 	}
 	// If a provider key is unset the CLI still reaches the default provider via
 	// env; the agent.New setup is the same one the CLI `think` uses.
-	res, err := a.Ask(ctx, goal)
+	// Honor the optional env-var session budget (ELING_SESSION_MAX_DURATION_SEC).
+	ac, cancel, _ := budget.WithEnvMaxDuration(ctx, budget.EnvSessionMaxDuration)
+	defer cancel()
+	res, err := a.Ask(ac, goal)
 	if err != nil {
 		return "", err
 	}

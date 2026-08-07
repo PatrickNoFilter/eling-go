@@ -738,6 +738,7 @@ func main() {
 						fmt.Println("  /plan      - Toggle plan mode (draft + approve before tools)")
 						fmt.Println("  /save      - Save state")
 						fmt.Println("  /session   - Show session info")
+						fmt.Println("  /budget    - Show session budget state (turns/duration/idle)")
 						fmt.Println("  /providers - List providers")
 						fmt.Println("  /quit      - Exit")
 						fmt.Println("  /clear     - Clear screen")
@@ -808,6 +809,21 @@ func main() {
 								snap.TurnsUsed, snap.MaxTurns, snap.MaxDuration, snap.IdleTimeout)
 						} else {
 							fmt.Println("  budget: off (max_turns/max_duration_sec/idle_timeout_sec = 0)")
+						}
+					case "/budget", "/sessionbudget":
+						snap := sess.Snapshot()
+						if !snap.Armed {
+							fmt.Println("  budget: off (all knobs 0)")
+							fmt.Println("  set via config: session.max_duration_sec / session.max_turns / session.idle_timeout_sec")
+							fmt.Println("  or env: ELING_SESSION_MAX_DURATION_SEC (unattended only)")
+							continue
+						}
+						fmt.Println("  session budget:")
+						fmt.Printf("    turns:     %d / %d\n", snap.TurnsUsed, snap.MaxTurns)
+						fmt.Printf("    max_dur:   %v\n", snap.MaxDuration)
+						fmt.Printf("    idle:      %v\n", snap.IdleTimeout)
+						if !snap.LastActivity.IsZero() {
+							fmt.Printf("    last_act:  %s\n", snap.LastActivity.Format("15:04:05"))
 						}
 					case "/providers":
 						for _, p := range ag.ListProviders() {

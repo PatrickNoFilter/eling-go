@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"eling/internal/agent"
-	"eling/internal/autorepair"
 	"eling/internal/automate"
+	"eling/internal/autorepair"
 	"eling/internal/config"
 	"eling/internal/layers"
 	"eling/internal/learnings"
@@ -916,9 +916,10 @@ func cmdLearnings(cfg *config.Config, args []string) bool {
 // autorepair engine plus the persisted quarantine list.
 //
 // Subcommands:
-//   eling autorepair reenable <tool>   Manual re-enable of a quarantined tool
-//   eling autorepair autofix on|off      Toggle the opt-in autofix gate
-//   eling autorepair                        (dashboard)
+//
+//	eling autorepair reenable <tool>   Manual re-enable of a quarantined tool
+//	eling autorepair autofix on|off      Toggle the opt-in autofix gate
+//	eling autorepair                        (dashboard)
 func cmdAutorepair(cfg *config.Config, args []string) bool {
 	// Load persisted quarantine state so a fresh CLI process reflects last run.
 	autorepair.LoadQuarantineState()
@@ -1567,6 +1568,9 @@ func cmdConfigSchema() bool {
   memory.max_long_term   - Long-term memory capacity
   memory.decay_rate      - Memory decay rate (0.0-1.0)
   session.auto_save      - Auto-save interval (seconds)
+  session.max_duration_sec - Session wall-clock cap in seconds (0 = off)
+  session.max_turns      - Max user turns per session (0 = off)
+  session.idle_timeout_sec - Auto-save + exit after N idle seconds (0 = off)
   mcp.enabled            - Enable MCP server`)
 	return true
 }
@@ -2968,8 +2972,17 @@ func getConfigValue(cfg *config.Config, key string) string {
 			}
 		}
 	case "session":
-		if len(parts) > 1 && parts[1] == "auto_save" {
-			return fmt.Sprintf("%t", cfg.Session.AutoSave)
+		if len(parts) > 1 {
+			switch parts[1] {
+			case "auto_save":
+				return fmt.Sprintf("%t", cfg.Session.AutoSave)
+			case "max_duration_sec":
+				return fmt.Sprintf("%d", cfg.Session.MaxDurationSec)
+			case "max_turns":
+				return fmt.Sprintf("%d", cfg.Session.MaxTurns)
+			case "idle_timeout_sec":
+				return fmt.Sprintf("%d", cfg.Session.IdleTimeoutSec)
+			}
 		}
 	case "mcp":
 		if len(parts) > 1 && parts[1] == "enabled" {
@@ -3012,8 +3025,17 @@ func setConfigValue(cfg *config.Config, key, value string) {
 			}
 		}
 	case "session":
-		if len(parts) > 1 && parts[1] == "auto_save" {
-			cfg.Session.AutoSave = value == "true" || value == "1"
+		if len(parts) > 1 {
+			switch parts[1] {
+			case "auto_save":
+				cfg.Session.AutoSave = value == "true" || value == "1"
+			case "max_duration_sec":
+				fmt.Sscanf(value, "%d", &cfg.Session.MaxDurationSec)
+			case "max_turns":
+				fmt.Sscanf(value, "%d", &cfg.Session.MaxTurns)
+			case "idle_timeout_sec":
+				fmt.Sscanf(value, "%d", &cfg.Session.IdleTimeoutSec)
+			}
 		}
 	case "mcp":
 		if len(parts) > 1 && parts[1] == "enabled" {

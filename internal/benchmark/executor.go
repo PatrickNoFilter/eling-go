@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"eling/internal/agent"
+	"eling/internal/budget"
 )
 
 // ──────────────────────────────────────────────────────────────────────
@@ -40,7 +41,11 @@ func (e *OnlineExecutor) Execute(ctx context.Context, tc *TestCase) (*TestResult
 	switch tc.Suite {
 	case SuiteMemory, SuiteSession:
 		log.Printf("[benchmark] running agent test: %s", tc.ID)
-		response, err := e.ag.Ask(ctx, tc.Input)
+		// Honor the env-var session budget so benchmark runs are bounded
+		// without config plumbing (ELING_SESSION_MAX_DURATION_SEC).
+		ac, cancel, _ := budget.WithEnvMaxDuration(ctx, budget.EnvSessionMaxDuration)
+		defer cancel()
+		response, err := e.ag.Ask(ac, tc.Input)
 		if err != nil {
 			result.Passed = false
 			result.Error = fmt.Sprintf("agent error: %v", err)
