@@ -13,6 +13,11 @@ This document evolves, in order: **P1 Output Constraints for End Messages**, **P
 
 ## P1 — Output Shaping for End Messages
 
+> **Status: DONE** — `internal/layers/shaping.go` pump (`d4253dd`), `OutputConfig`/`output` block with
+> `end_message_runes` / `end_message_paras` / `end_message_no_md` (`9c8dc77`), agent choke-point wiring
+> `Agent.shapeEndMessage` → `end_message_produce` hook (`2613fd2`); tests in `internal/agent/output_shaping_test.go`.
+> All defaults zero → pure passthrough on fresh installs.
+
 **Theory**: The final assistant message in a turn is *state* to future turns (resume/context). Enforce a
 numeric budget and a format policy *just-in-time*, at the single choke point where the final string is
 produced, so the user-facing closing message is predictable and does not blow the plan budget.
@@ -126,6 +131,10 @@ full = wc.content
 
 ## P2 — Session/MCP/Permissions persistence wiring (validated before persist)
 
+> **Status: DONE** — `Manager.Save/SaveAll` re-verify token totals via `verifyTotals()` (`0fc5b59`),
+> MCP `ManagerFromConfig`/`Reset` config reload (`a2bc3ea`), `PermissionsConfig → PermPolicy` bridge
+> asserted by `TestPermPolicyFromConfig` (`384f9d5`).
+
 **Theory**: When a turn completes, the facts the agent derived **must be writable** (no lost learning),
 and the end-of-session bookkeeping that records *what it learned / what it opened* must recompute its
 own numbers from verified state rather than trusting stale values.
@@ -203,6 +212,9 @@ type GuardrailsAssert struct {
 ---
 
 ## D — Evidence / Session doc index
+
+> **Status: DONE** — acceptance (build/vet/test green at each phase) recorded in the P1–P3 commits above;
+> user-facing docs synced in the README/docs commit (`docs: sync README + docs with P1/P2/P3 feature set`).
 
 | Internal SES | Build sketch |
 |---|---|

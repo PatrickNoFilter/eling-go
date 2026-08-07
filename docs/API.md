@@ -61,6 +61,22 @@ mcp:
 session:
   auto_save: true                              # Auto-save every 5 minutes
   save_dir: "~/.eling/sessions"                # Session save directory
+  # verify_totals (internal): on save, total_tokens metadata is recomputed
+  # against the entries; drift is logged (audit-only, never hard-fails)
+
+permissions:                                   # Per-tool permission gate (opt-in; empty = allow-all)
+  default: "allow"                             # "allow" | "ask" | "deny" for unlisted tools
+  rules: []                                    # per-tool overrides: {tool: "bash", mode: "ask"}
+  projects: {}                                 # abs project path -> "full" | "ask" | "deny"
+
+output:                                        # Final assistant message shaping (opt-in; empty = passthrough)
+  end_message_runes: 0                         # max runes (user-visible chars) of the final message; 0 = off
+  end_message_paras: 0                         # max paragraph count (blank-line split); 0 = off
+  end_message_no_md: false                     # strip markdown bullets/bold from the final message
+
+guardrails:                                    # Rust-style white-box invariants (opt-in; both false = inert)
+  audit: false                                 # log violations at the emit path, never block
+  strict: false                                # hard-veto the emit when an invariant is violated
 ```
 
 ---

@@ -162,3 +162,23 @@ Response payloads now include a `timeout_prediction` object with host, latency, 
 - **TokenRouter provider** added to the interactive menu (`9) tokenrouter` → `deepseek/deepseek-v4-flash` @ `https://api.tokenrouter.com/v1`); free keys at tokenrouter.com.
 - `eling setup` now **delegates to `eling-wizard.sh`** whenever it's found — the three entry points (`./eling setup`, `./eling-wizard.sh`, `./eling-setup`) run the exact same interactive flow. Extended flags the wizard doesn't support (`--add-provider`, `--test`, `--dedupe`) fall through to the built-in Go implementation in `internal/cli/setup.go`.
 - **Usage tip:** always `./eling setup --list` before editing to verify the config was written correctly.
+
+## 20. ECCADAption — Output Shaping, Validated Persistence, Rust-Style Guardrails
+
+**Added:** three-plan-phase feature set (see `eccadaption.md` at repo root) with all new behaviors **opt-in and default-off**, preserving fresh-install behavior exactly:
+
+### A. P1 — End-message output shaping (`internal/layers/shaping.go`)
+- New `EndMessagePolicy` + `NewEndMessage` pump: rune cap (with truncation trailer), paragraph cap, markdown-strip — applied at a single choke point in the agent (`Agent.shapeEndMessage`, agent.go).
+- Config: `output.end_message_runes` / `output.end_message_paras` / `output.end_message_no_md` (all default 0/false).
+- Fires new `end_message_produce` lifecycle hook with `{before_len, after_len, note}` when shaping actually fires.
+
+### B. Self-Validated Persistence (P2)
+- Session: `verifyTotals()` recomputes `total_tokens` on save and logs drift (audit-only, never hard-fails).
+- MCP: `ManagerFromConfig(cfg)` + `Manager.Reset(cfg)` reload configured servers mid-session without dropping sessions.
+- Permissions: `PermissionsConfig → PermPolicy` bridge asserted by `TestPermPolicyFromConfig` (default/mode mapping, invalid-rule dropping, resolution order rule > project trust > default).
+
+### C. Rust-style Guardrails (P3)
+- `internal/layers/guardrails.go`: four white-box invariants (`end_message_under_budget`, `session_token_monotonic`, `openers_match_perms`, `mcp_server_matches_config`) exposed as `GuardrailID` + `GuardrailsAssert{Violation, Witness}` + `AssertAll()`/`DescribeAll()`. Zero witness ⇒ zero asserts ⇒ fully inert.
+- Config: `guardrails.audit` (log-only) / `guardrails.strict` (hard-veto). Wired into the end-message emit path first.
+
+**Impact:** zero behavior change until configured; each phase verified with `go build`, `go vet`, and `go test` before commit (P1: `9c8dc77`+`d4253dd`+`2613fd2`, P2: `0fc5b59`+`a2bc3ea`+`384f9d5`, P3: `806272d`+`94c1313`+`d038c56`).

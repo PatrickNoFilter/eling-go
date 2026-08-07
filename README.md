@@ -117,6 +117,9 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 - **Tool output limits**: 512 KiB cap per command, 256 KiB per tool result
 - **Bash sandbox** (v0.3.0): every `bash` command runs in a fresh per-invocation dir under `~/.eling/sandbox/` with a scrubbed env (locked PATH, HOME redirected, `ELING_SANDBOX=1`, API keys stripped), a 15-pattern destructive-command guard (`rm -rf /`, `mkfs`, `dd of=/dev/*`, fork bombs, `curl|sh`, …) that blocks by default, and best-effort network isolation via `unshare -n`. Real-tree operations require the explicit `allow_host: true` opt-in arg. Config: `sandbox.enabled/root/max_output/timeout_sec/guard_mode` (default **on**; `guard_mode: warn` downgrades blocks to warnings). TUI header shows `🏝️ snd on`.
 - **Git worktrees** (v0.3.0): `worktree_create`/`worktree_list`/`worktree_remove`/`worktree_merge` tools let the agent experiment on isolated branches under `~/.eling/worktrees/` — experiments never touch the main working tree until explicitly merged back
+- **End-message shaping** (v0.8.0, ECCADAption P1): opt-in `output` block caps/cleans the **final assistant message** of each turn at a single choke point — `output.end_message_runes` (max runes), `output.end_message_paras` (max paragraphs), `output.end_message_no_md` (strip markdown bullets/bold). When shaping fires it emits the `end_message_produce` lifecycle hook (`{"before_len":N,"after_len":M,"note":"..."}`) for audit/observability. All defaults `0/false` → pure passthrough on fresh installs. See `eccadaption.md`.
+- **Rust-style guardrails** (v0.8.0, ECCADAption P3): opt-in white-box invariants modelled on compiler-inserted runtime checks (`internal/layers/guardrails.go`) — the shaped end message stays **under budget**, session token totals are **monotonic** across saves, opened tools **match the permissions projection**, live MCP servers **match the config**. `guardrails.audit: true` logs violations (never blocks); `guardrails.strict: true` hard-vetoes the emit. Both `false` by default → fully inert.
+- **Self-validated persistence** (v0.8.0, ECCADAption P2): on save, session metadata is recomputed (`verifyTotals` — drift is logged, audit-only, never hard-fails); the MCP manager can be rebuilt from config mid-session (`ManagerFromConfig`/`Reset`) so config edits apply without a restart; the `permissions` block (default/`rules`/`projects` → allow/ask/deny) is bridged into the tool registry with a tested mapping (explicit rule > project trust > default). Empty block = historical allow-everything.
 - **UTF-8 safe**: Rune-aware truncation prevents splitting multi-byte chars
 - **Auto-backup before write/edit**: Every `write`/`edit` snapshots the existing file to `*.bak.<timestamp>` (rotation keeps the last 2; configurable via `ELING_BACKUP_DIR` / `ELING_BACKUP_KEEP`)
 - **Web timeout prediction**: `web_fetch`/`web_search` do a fast DNS+TCP preflight probe (dead hosts fail in ~1.5s) and adapt `--max-time` per host based on observed latency/failure history
@@ -386,6 +389,8 @@ eling/
 │   │   ├── rules.go               # Rule-based memory filtering
 │   │   ├── snapshot.go            # Brain state snapshots
 │   │   ├── spec_kit.go            # Specification toolkit
+│   │   ├── shaping.go             # ECCADAption P1: end-message shaping pump (runes/paras/markdown)
+│   │   ├── guardrails.go          # ECCADAption P3: Rust-style guardrail white-box invariants
 │   │   └── verify_on_stop.go      # Stop-time verification
 │   ├── logger/
 │   │   ├── logger.go              # Crash-safe logger, signal handling, crash reports
@@ -503,6 +508,22 @@ hooks:                          # Phase 5: user-defined shell-script hooks (v0.3
     pre_tool_use: []            # can veto via {"block":true,"reason":"..."} on stdout
     post_tool_use: []           # e.g. run go vet after every edit of a .go file
     error_occurred: []
+
+permissions:                    # Per-tool permission gate (opt-in; empty = allow-everything)
+  default: "allow"             # "allow" | "ask" | "deny" for unlisted tools
+  rules:                       # per-tool overrides
+    - tool: "bash"
+      mode: "ask"
+  projects: {}                  # abs project path -> "full" | "ask" | "deny"
+
+output:                         # Final assistant message shaping (v0.8.0, opt-in — empty = passthrough)
+  end_message_runes: 0          # max user-visible chars (runes) of final message; 0 = no cap
+  end_message_paras: 0          # max paragraph count (blank-line split); 0 = no cap
+  end_message_no_md: false      # strip markdown bullets/bold from the final message
+
+guardrails:                     # Rust-style white-box invariants (v0.8.0, opt-in — both false = inert)
+  audit: false                  # log guardrail violations only (never block)
+  strict: false                 # hard-veto an emitting change that violates an invariant
 ```
 
 All state is persisted to `~/.eling/`:
@@ -526,7 +547,7 @@ All state is persisted to `~/.eling/`:
 Attach shell scripts to ELING's lifecycle events — the Qwen Code hook model on top of
 ELING's internal `fireHook` system (Phase 5 of the feature heist).
 
-**Available events** (7 canonical lifecycle hooks):
+**Available events** (17 canonical lifecycle hooks; the 8 most useful are shown):
 
 | Event | When it fires | Script stdin (JSON) |
 |-------|---------------|---------------------|
@@ -537,6 +558,7 @@ ELING's internal `fireHook` system (Phase 5 of the feature heist).
 | `pre_tool_use` | **Before** a tool runs — can veto | `{"tool_name":"bash","arguments":"{...}"}` |
 | `post_tool_use` | After a tool result | `{"tool_name":"edit","arguments":"{...}","result":"...","duration_ms":123}` |
 | `error_occurred` | An error was logged | `{"error":"..."}` |
+| `end_message_produce` | Fired just before the final assistant message is committed, **only when output shaping fires** (P1) | `{"before_len":123,"after_len":80,"note":"rune-capped"}` |
 
 **Configure** in `~/.eling/config.yaml`:
 
@@ -581,6 +603,8 @@ echo "$ctx" | grep -q '"tool_name":"edit"' && (cd /root/eling && go vet ./... >/
 ---
 
 ## 🔧 Provider Setup
+
+> **v0.8.0 (unreleased):** ECCADAption P1–P3 landed — **end-message shaping** (opt-in `output.end_message_runes/end_message_paras/end_message_no_md`, fires `end_message_produce`), **self-validated persistence** (session `verifyTotals` drift audit, MCP `ManagerFromConfig`/`Reset` reload on config edit, tested `permissions`→policy bridge), and **Rust-style guardrails** (`guardrails.audit` log-only / `guardrails.strict` hard-veto, four white-box invariants over emit paths). All new behaviors default **off** — a fresh install preserves v0.7.1 behavior exactly. See `eccadaption.md`.
 
 > **v0.7.1:** MCP server fixes — `mcp/srv.NewServer` now assigns a real `stdout` (it defaulted to nil, so the server could never answer an initialize handshake, seen as `context deadline exceeded` / empty client stdout), and `mcp.NewManager.Connect` now keeps the MCP server child process alive after `Connect` returns so spawned `elling --mcp` servers don't die on the first client. Fixes MCP client/server connectivity end-to-end.
 

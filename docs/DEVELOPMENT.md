@@ -53,6 +53,8 @@ eling/
 │   │   ├── notion.go          # Layer 7: Notion API sync (optional)
 │   │   ├── continuum.go       # Layer 8: Multi-agent orchestration hub
 │   │   ├── hooks.go           # BrainQuery hook (semantic search integration)
+│   │   ├── shaping.go         # ECCADAption P1: end-message shaping pump (budget/paras/markdown)
+│   │   ├── guardrails.go      # ECCADAption P3: Rust-style guardrail white-box invariants
 │   │   ├── think.go           # HRR reasoning engine
 │   │   ├── privacy.go         # Privacy filtering
 │   │   ├── rules.go           # Rule-based filtering
