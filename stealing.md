@@ -588,12 +588,12 @@ already ✅ above. **A6 ✅ (2026-08-03, lsp_rename tool + applyEdit safety net)
 | D1 | **Project rules ingestion** (AGENTS.md/CLAUDE.md/DEEPCODE.md → system prompt) | ✅ 2026-08-06 | S | 🔥🔥🔥 | `internal/layers/rules_ingest.go` (new); `agent.go` boot-load + `buildMessages()` inject (A10 path); `cli.go` `eling rules show`/`--refresh` |
 | D2 | **Verify→Repair loop** (evidence-driven completion / Loop Engineering) | ✅ 2026-08-06 | S–M | 🔥🔥🔥 | `internal/verify/evidence.go` + `loop.go` (new); `agent.go` `verifyToolCalls()` gate + `Round()`/`Final()` (wired, default ON); `verify.max_rounds` (not global `maxToolRounds`); `--no-verify` + plan-mode opt-out |
 | D3 | **Multi-agent parallelism in isolated worktrees** (conflict-surfaced) | ⏳ | M | 🔥🔥 | `internal/tools/worktree.go` (Phase 1 infra exists); SubAgents deferred since Part I |
-| D4 | **Scheduled automations** (`eling automate add … --schedule`) | ⏳ | M | 🔥🔥 | `internal/hooks/hooks.go` (Phase 5 events, no scheduler); `internal/server/server.go` (daemon) |
+| D4 | **Scheduled automations** (`eling automate add … --schedule`) | ✅ 2026-08-07 | M | 🔥🔥 | `internal/automate/automate.go` (new: cron parse + overlap-guarded Scheduler); `cli.go` `eling automate …`; `config.go` `automate.jobs[]`; daemon starts scheduler when enabled |
 | D5 | **Evidence taxonomy per task type** | ✅ 2026-08-06 (via D2) | — | 🔥 | `internal/verify/evidence.go` selector — Go → `go test ./...`/`go vet`/LSP, docs → diff; **folded into D2** (not standalone) |
 | D6 | **Per-tool permission profiles** (allow/ask/deny + project trust) | ⏳ | M | 🔥 | plan mode (`--plan`); sandbox `guard_mode`; no per-tool trust zones |
 | D7 | **Atomic commit discipline** (conventional commits + build/test gate) | ✅ 2026-08-06 | XS | 🔥 | default system prompt: only the SEARCH RULE — no commit-workflow rule |
 
-**Suggested sprint:** D1 ✅ → **D7 (XS quick win)** ✅ → D2 ✅ → D4 → D6 → D3 (quick wins first; D3 last — highest risk, gated). **Remaining:** D4 → D6 → D3.
+**Suggested sprint:** D1 ✅ → **D7 (XS quick win)** ✅ → D2 ✅ → D4 ✅ → D6 → D3 (quick wins first; D3 last — highest risk, gated). **Remaining:** D6 → D3.
 
 ---
 
@@ -715,7 +715,7 @@ shipped in Phase 1 — so this is the **v2 un-defer**, now de-risked by isolatio
 
 ---
 
-### D4 — Scheduled automations  `[candidate — Phase 4, M]`
+### D4 — Scheduled automations  `[✅ DONE 2026-08-07 — 8f733ae]`
 
 **What DeepCode does:** saves a stable workflow and runs it manually or on a schedule (regression
 scans, test-repair, docs upkeep).
@@ -734,14 +734,16 @@ daemon owns — nightly `go test ./...` + auto-repair report, weekly docs-freshn
 4. `eling automate list/remove/logs`.
 
 **Files touched:** `internal/automate/automate.go` (new), `internal/cli/cli.go`,
-`internal/config/config.go`, `internal/server/server.go`, `internal/automate/automate_test.go` (new).
+`internal/config/config.go`, `internal/server/server.go`, `internal/automate/automate_test.go` (new) — plus `docs/automate.md` (new, shipped in the D4 docs commit).
 
 **Acceptance:**
-- [ ] `eling automate add` persists; `list` shows it; daemon fires it at schedule (test with 1-minute schedule)
-- [ ] Overlap: a slow job running → second tick skipped + logged
-- [ ] `./rebuild.sh` green
+- [x] `eling automate add` persists; `list` shows it; daemon fires it at schedule (test with 1-minute schedule) — async CLI + Scheduler.scan fires due jobs; round-trip + firing covered in `automate_test.go`
+- [x] Overlap: a slow job running → second tick skipped + logged — `TestSchedulerOverlapGuard`
+- [x] `./rebuild.sh` green
 
-**Effort:** M (1–2 days) · **Risk:** medium (daemon lifecycle, time parsing)
+**Status (2026-08-07):** Implemented + committed `8f733ae`. New `internal/automate/` package: dependency-free 5-field cron parser (`ParseCron`), `Scheduler` with per-job overlap guard (never runs the same job twice concurrently; skip + log), and `Runner` abstraction (command jobs via `/bin/sh -c`; goal jobs via a freshly-created agent — session-less, mirroring `--run`). CLI added `eling automate add|list|remove|run|enable|disable|logs` plus enable/disable-scheduler. Jobs persist in `config.yaml` `automate.jobs[]` with `LastRun`/`LastStatus` bookkeeping. Daemon (`cmdServe`) starts the scheduler when `automate.enabled`, cancels in-flight jobs on shutdown. Output appended to `~/.eling/automations.log`. Verified with go build + go vet + `go test ./...` (all packages) + `./rebuild.sh`.
+
+**Effort:** M (1–2 days) · **Risk:** medium (daemon lifecycle, time parsing) — resolved as committed
 
 ---
 
@@ -846,7 +848,7 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
 | D1 | 🟢 read-only boot-time probe; separate file | 🔴 `rules.go` exists but only **writes/detects** for other agents — no self-ingest; no conflict | 🟢 rules steering every turn = real win | 🟢 reuse learnings injection (A10) mechanism; cap size |
 | D2 | 🟢 new package; gate in tool loop is sequential | ✅ implemented `b7d26e4` — `internal/verify/evidence.go` + `loop.go`; wired via `verifyToolCalls()`; bounded by `verify.max_rounds` (not global `maxToolRounds`) | 🟢 the #1 waste in coding agents; bounded by max_rounds | ✅ done — cap rounds/timeouts; never claim success with failing evidence |
 | D3 | 🔴 nested agent concurrency = race risk (the v1 deferral) | 🟢 worktree.go is infra only — no orchestrator exists | 🟡 real win only if isolation holds | 🟡 gate default **off**; require `go test -race`; per-agent budget |
-| D4 | 🟢 scheduler single-goroutine ticker + overlap guard | 🟢 hooks (Phase 5) are event-driven — no scheduler exists | 🟢 | 🟢 add overlap guard + logs |
+| D4 | 🟢 scheduler single-goroutine ticker + overlap guard | 🟢 hooks (Phase 5) are event-driven — no scheduler exists | 🟢 | ✅ implemented `8f733ae` — `internal/automate/automate.go`; overlap guard + `~/.eling/automations.log`; no new heavy cron dep |
 | D5 | — | — | — | ✅ folded into D2 (`evidence.go`) — done `b7d26e4` |
 | D6 | 🟢 additive check before dispatch | 🟢 no per-tool permission infra; plan mode + guard_mode are different layers | 🟢 | 🟢 default `ask`/`allow` preserves behavior |
 | D7 | 🟢 prompt-only text; no new state/goroutines | 🟢 no existing commit-workflow rule in `config.go`; distinct from D2 (runtime verify loop) | 🟢 formalizes a habit already practiced | 🟢 quick win (XS); prompt-only, no deps |
@@ -874,7 +876,7 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
 
 1. `./rebuild.sh` mandatory before commit; `go test -race ./...` for D2 and D3 (concurrency).
 2. `create_backup` before each phase; one phase per commit.
-3. ✅ D1 (S) landed first (`49372ca`); D2 (S–M) the headline phase landed second (`b7d26e4`). **Remaining order:** D4 → D6 → D3.
+3. ✅ D1 (S) landed first (`49372ca`); D2 (S–M) the headline phase landed second (`b7d26e4`); D4 (M) landed third (`8f733ae`). **Remaining order:** D6 → D3.
 4. Update `docs/` (A7 subsystem docs — add `docs/verify.md`, `docs/rules.md` etc.) in the same
    commit as any phase. ✅ `docs/verify.md` shipped in `b7d26e4`; `docs/rules.md` in `49372ca`.
 5. Bump version via `go-version-bump` on milestones (D2 is a strong v0.5.0 candidate). ⏳ **Not yet bumped** — D2 (`b7d26e4`) is unversioned; latest tag is still `v0.4.4`. Consider a v0.5.0 tag now or at the next milestone.
