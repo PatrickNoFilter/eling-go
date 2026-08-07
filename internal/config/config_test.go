@@ -157,3 +157,35 @@ func TestSessionBudgetRoundTrip(t *testing.T) {
 		t.Errorf("old config without budget keys: got %+v, want all-zero", oldCfg.Session)
 	}
 }
+
+// TestGuardrailsConfigInertByDefault pins P3: a fresh install must have the
+// Guardrails block fully inert (audit=false, strict=false) so the white-box
+// scaffolding never changes behavior unless explicitly enabled.
+func TestGuardrailsConfigInertByDefault(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Guardrails.Audit {
+		t.Fatal("Guardrails.Audit must default to false (inert)")
+	}
+	if cfg.Guardrails.Strict {
+		t.Fatal("Guardrails.Strict must default to false (inert)")
+	}
+	if cfg.Guardrails.Active() {
+		t.Fatal("Guardrails.Active() must be false on a fresh install")
+	}
+}
+
+// TestGuardrailsConfigActiveFlags verifies Active() reflects either knob.
+func TestGuardrailsConfigActiveFlags(t *testing.T) {
+	g := GuardrailsConfig{Audit: true}
+	if !g.Active() {
+		t.Error("Audit-only block must be Active")
+	}
+	g = GuardrailsConfig{Strict: true}
+	if !g.Active() {
+		t.Error("Strict-only block must be Active")
+	}
+	g = GuardrailsConfig{}
+	if g.Active() {
+		t.Error("zero block must be inactive")
+	}
+}

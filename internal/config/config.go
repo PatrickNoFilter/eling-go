@@ -28,6 +28,7 @@ type Config struct {
 	Permissions PermissionsConfig `yaml:"permissions"`
 	Agents      AgentsConfig      `yaml:"agents"`
 	Output      OutputConfig      `yaml:"output"`
+	Guardrails  GuardrailsConfig  `yaml:"guardrails"`
 }
 
 // OutputConfig governs how the agent shapes its user-facing output.
@@ -50,6 +51,23 @@ type OutputConfig struct {
 func (o OutputConfig) Active() bool {
 	return o.EndMessageRunes > 0 || o.EndMessageParas > 0 || o.EndMessageNoMD
 }
+
+// GuardrailsConfig gates the P3 Rust-style white-box invariants on the
+// persist/emit paths. Both knobs default to false so the scaffolding is
+// fully INERT: a fresh install runs exactly as before.
+//
+//   - Audit  (log-only): when true, guardrail violations are logged at the
+//     emit path but never change behavior.
+//   - Strict (hard veto): when true, a violation on the emit path refuses to
+//     apply the change (e.g. the shaped end message is discarded and the
+//     original is kept).
+type GuardrailsConfig struct {
+	Audit  bool `yaml:"audit,omitempty"`
+	Strict bool `yaml:"strict,omitempty"`
+}
+
+// Active reports whether any guardrail knob is enabled (audit or strict).
+func (g GuardrailsConfig) Active() bool { return g.Audit || g.Strict }
 
 // PermissionsConfig configures the D6 per-tool permission profiles. It lets the
 // user gate sensitive/destructive tools per project without blanket-approving
