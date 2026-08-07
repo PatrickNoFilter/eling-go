@@ -6,6 +6,21 @@
 safety net that does **not** exist today. Per-turn timeouts and per-tool budgets
 already exist; this plan adds the *session-level* bounds.
 
+## Implementation status (updated 2026-08-08)
+
+| Step | Status | Commit |
+|---|---|---|
+| 1. Config fields (`max_duration_sec`/`max_turns`/`idle_timeout_sec`) | ✅ done | `52c160a` |
+| 2. `internal/budget` package (Enforce/BeginTurn/EndTurn, `Exceeded`) | ✅ done | `743fb7b` |
+| 3. Root deadline — `--run` + REPL `replCtx` | ✅ done | `94fc20d` |
+| 4. Turn-count bucket — REPL loop | ✅ done | `94fc20d` |
+| 5. Idle stopwatch — **REPL done; TUI pending** | 🟡 partial | `94fc20d` |
+| 6. CLI exposure — `/session` live display done; `config` CLI keys + `/sessionbudget` pending | 🟡 partial | `94fc20d` |
+| P2 follow-up — `ELING_SESSION_MAX_DURATION_SEC` env override for automate/benchmark | ⬜ pending | — |
+
+All knobs default `0 = off`; fresh-install behavior unchanged (verified by
+`go build ./... && go vet ./... && go test ./...`).
+
 ---
 
 ## 1. Why this exists (the gap)
