@@ -281,11 +281,10 @@ func New(cfg *config.Config) (*Agent, error) {
 	mem.MaxLong = cfg.Memory.MaxLongTerm
 
 	sesMgr := session.NewManager(cfg.Session.SaveDir)
-	mcpMgr := mcp.NewManager()
-	// MCP handshake timeout from config: a server that starts but never answers
-	// the initialize handshake must fail loudly (visible in /stats, /mcp, banner)
-	// instead of blocking startup forever.
-	mcpMgr.SetConnectTimeout(cfg.MCP.ConnectTimeout)
+	// MCP manager built from config (P2.2): applies the config connect timeout
+	// as the initialize-handshake cap so a server that starts but never answers
+	// fails loudly (visible in /stats, /mcp, banner) instead of blocking startup.
+	mcpMgr := mcp.ManagerFromConfig(cfg.MCP)
 
 	a := &Agent{
 		cfg:             cfg,

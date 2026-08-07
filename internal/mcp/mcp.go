@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"eling/internal/config"
 	"eling/internal/logger"
 )
 
@@ -86,6 +87,56 @@ func (m *Manager) SetConnectTimeout(d time.Duration) {
 	m.mu.Lock()
 	m.connectTimeout = d
 	m.mu.Unlock()
+}
+
+// ManagerFromConfig builds a Manager configured from cfg.MCP. It applies the
+// config's connect timeout when nonzero, but does NOT start any server — call
+// Reset (or Connect per server) to actually connect. This is a load helper for
+// the P2.2 "reload from config" path.
+func ManagerFromConfig(cfg config.MCPConfig) *Manager {
+	m := NewManager()
+	if cfg.ConnectTimeout > 0 {
+		m.SetConnectTimeout(cfg.ConnectTimeout)
+	}
+	return m
+}
+
+// Reset reconciles the manager's live servers against the servers in cfg.
+// Servers still listed in config are left running (their in-flight state is
+// preserved); servers no longer present are disconnected; new servers are
+// connected. Any connect error for a newly added server is recorded in
+// Failures() (surfaced in the badge) rather than making Reset fail atomically.
+// The session itself is never dropped.
+func (m *Manager) Reset(ctx context.Context, cfg config.MCPConfig) {
+	m.mu.RLock()
+	live := make(map[string]*Server, len(m.servers))
+	for n, s := range m.servers {
+		live[n] = s
+	}
+	m.mu.RUnlock()
+
+	want := make(map[string]config.MCPServerConfig, len(cfg.Servers))
+	for _, s := range cfg.Servers {
+		want[s.Name] = s
+	}
+
+	// Disconnect servers no longer configured.
+	for name := range live {
+		if _, ok := want[name]; !ok {
+			_ = m.Disconnect(name)
+		}
+	}
+
+	// Connect new servers; keep existing ones untouched.
+	for name, sc := range want {
+		if _, ok := live[name]; ok {
+			continue
+		}
+		if err := m.Connect(ctx, sc.Name, sc.Command, sc.Args, sc.Env); err != nil {
+			// Already recorded via connErr; just surface once here.
+			logger.Global().Debug("MCP reset failed to add %s: %v", name, err)
+		}
+	}
 }
 
 // Connect starts and initializes an MCP server via stdio.

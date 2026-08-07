@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"eling/internal/config"
 )
 
 // TestHelperMCPServer is a fake MCP server used as a helper subprocess.
@@ -209,5 +211,72 @@ func TestConnectRecordsImmediateExitError(t *testing.T) {
 	}
 	if got := m.List(); len(got) != 0 {
 		t.Fatalf("List() = %v, want empty", got)
+	}
+}
+
+// TestManagerFromConfigAppliesTimeout verifies the P2.2 load helper applies the
+// config connect timeout but does not start any server.
+func TestManagerFromConfigAppliesTimeout(t *testing.T) {
+	cfg := config.MCPConfig{
+		Enabled:        true,
+		ConnectTimeout: 37 * time.Millisecond,
+	}
+	m := ManagerFromConfig(cfg)
+	m.mu.RLock()
+	got := m.connectTimeout
+	m.mu.RUnlock()
+	if got != 37*time.Millisecond {
+		t.Fatalf("connectTimeout = %v, want 37ms", got)
+	}
+	if len(m.List()) != 0 {
+		t.Fatalf("ManagerFromConfig must not connect anything, List=%v", m.List())
+	}
+}
+
+// TestResetAddsAndRemovesServers verifies Reset reconciles live servers against
+// config: existing servers are untouched, removed ones are disconnected, and
+// newly added ones are connected (or recorded as failures, never crashing).
+func TestResetAddsAndRemovesServers(t *testing.T) {
+	m := NewManager()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary: %v", err)
+	}
+	// Bring up one server manually.
+	if err := m.Connect(context.Background(), "keep", exe,
+		[]string{"-test.run=TestHelperMCPServer"}, map[string]string{"MCP_HELPER": "1"}); err != nil {
+		t.Fatalf("Connect keep: %v", err)
+	}
+	m.SetConnectTimeout(300 * time.Millisecond)
+
+	// Reset to: keep "keep", add a working "new" server.
+	m.Reset(context.Background(), config.MCPConfig{
+		Servers: []config.MCPServerConfig{
+			{Name: "keep", Command: exe, Args: []string{"-test.run=TestHelperMCPServer"}, Env: map[string]string{"MCP_HELPER": "1"}},
+			{Name: "new", Command: exe, Args: []string{"-test.run=TestHelperMCPServer"}, Env: map[string]string{"MCP_HELPER": "1"}},
+		},
+	})
+
+	got := m.List()
+	set := map[string]bool{}
+	for _, n := range got {
+		set[n] = true
+	}
+	if !set["keep"] || !set["new"] {
+		t.Fatalf("after Reset List=%v; want both keep and new", got)
+	}
+
+	// Reset dropping "new" and a failing addition must not error or crash.
+	m.Reset(context.Background(), config.MCPConfig{
+		Servers: []config.MCPServerConfig{
+			{Name: "keep", Command: exe, Args: []string{"-test.run=TestHelperMCPServer"}, Env: map[string]string{"MCP_HELPER": "1"}},
+			{Name: "ghost", Command: "sh", Args: []string{"-c", "exit 1"}},
+		},
+	})
+	if got := m.List(); len(got) != 1 || got[0] != "keep" {
+		t.Fatalf("after Reset dropping new, List=%v; want [keep]", got)
+	}
+	if got := m.Failures()["ghost"]; got == "" {
+		t.Fatal("ghost server failure not recorded after Reset")
 	}
 }
