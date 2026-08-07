@@ -586,14 +586,14 @@ already ✅ above. **A6 ✅ (2026-08-03, lsp_rename tool + applyEdit safety net)
 | # | Adoption | Status | Effort | Value | ELING anchor (today) |
 |---|----------|--------|--------|-------|----------------------|
 | D1 | **Project rules ingestion** (AGENTS.md/CLAUDE.md/DEEPCODE.md → system prompt) | ✅ 2026-08-06 | S | 🔥🔥🔥 | `internal/layers/rules_ingest.go` (new); `agent.go` boot-load + `buildMessages()` inject (A10 path); `cli.go` `eling rules show`/`--refresh` |
-| D2 | **Verify→Repair loop** (evidence-driven completion / Loop Engineering) | ⏳ | S–M | 🔥🔥🔥 | `agent.go:3088 autoTest()` (Go-only, fire-and-forget); `internal/autorepair/state.go` (maxRetries/backoff); `internal/layers/verify_on_stop.go` (nudge only) |
+| D2 | **Verify→Repair loop** (evidence-driven completion / Loop Engineering) | ✅ 2026-08-06 | S–M | 🔥🔥🔥 | `internal/verify/evidence.go` + `loop.go` (new); `agent.go` `verifyToolCalls()` gate + `Round()`/`Final()` (wired, default ON); `verify.max_rounds` (not global `maxToolRounds`); `--no-verify` + plan-mode opt-out |
 | D3 | **Multi-agent parallelism in isolated worktrees** (conflict-surfaced) | ⏳ | M | 🔥🔥 | `internal/tools/worktree.go` (Phase 1 infra exists); SubAgents deferred since Part I |
 | D4 | **Scheduled automations** (`eling automate add … --schedule`) | ⏳ | M | 🔥🔥 | `internal/hooks/hooks.go` (Phase 5 events, no scheduler); `internal/server/server.go` (daemon) |
-| D5 | **Evidence taxonomy per task type** | ⏳ | — | 🔥 | **folded into D2** (not standalone) |
+| D5 | **Evidence taxonomy per task type** | ✅ 2026-08-06 (via D2) | — | 🔥 | `internal/verify/evidence.go` selector — Go → `go test ./...`/`go vet`/LSP, docs → diff; **folded into D2** (not standalone) |
 | D6 | **Per-tool permission profiles** (allow/ask/deny + project trust) | ⏳ | M | 🔥 | plan mode (`--plan`); sandbox `guard_mode`; no per-tool trust zones |
 | D7 | **Atomic commit discipline** (conventional commits + build/test gate) | ✅ 2026-08-06 | XS | 🔥 | default system prompt: only the SEARCH RULE — no commit-workflow rule |
 
-**Suggested sprint:** D1 ✅ → **D7 (XS quick win)** → D2 → D4 → D6 → D3 (quick wins first; D3 last — highest risk, gated).
+**Suggested sprint:** D1 ✅ → **D7 (XS quick win)** ✅ → D2 ✅ → D4 → D6 → D3 (quick wins first; D3 last — highest risk, gated). **Remaining:** D4 → D6 → D3.
 
 ---
 
@@ -631,7 +631,18 @@ conventions by trial.
 
 ---
 
-### D2 — Verify→Repair loop (evidence-driven completion / Loop Engineering)  `[candidate — Phase 2, S–M]`
+### D2 — Verify→Repair loop (evidence-driven completion / Loop Engineering)  `[✅ DONE 2026-08-06 b7d26e4]`
+
+**Status:** Implemented & committed (`b7d26e4 feat(verify): wire execute-verification verify→repair loop`).
+New `internal/verify` package: `evidence.go` (per-task evidence selector — Go edit →
+`go test ./...` fallback `go build ./...`, no-tests → `go vet`/LSP diagnostics, docs → diff-only =
+the folded D5 taxonomy) + `loop.go` (`Round()` runs evidence after each tool round; failures are
+injected as the next user message for repair, bounded by the dedicated `verify.max_rounds`, default 2;
+`Final()` appends an honest `Evidence:` block — PASS or STILL-FAILING, never success with failing
+evidence). Wired into both agent tool loops via `verifyToolCalls()` (`agent.go`), commissioned from
+`cfg.Verify` (default ON; `--no-verify` off, plan‑mode‑gated turns opted out). Per-turn reset so
+evidence never leaks across Ask/AskStream turns. New `docs/verify.md` + wiring/commissioning tests
+(`verify_wiring_test.go`, `verify_test.go`). Build clean, `go vet` clean, full `go test ./...` green.
 
 **What DeepCode does:** the agent picks *appropriate verification evidence* for the task (test
 output, build result, static diagnostics, diff/artifact), runs it, and **a failed verification is
@@ -660,12 +671,12 @@ ELING today: `autoTest()` (`agent.go:3088`) runs `go test` but **Go-only and fir
 `internal/verify/verify_test.go` (new).
 
 **Acceptance:**
-- [ ] Introduce a Go syntax error via edit → next turn contains `[verification failed]` and the agent repairs
-- [ ] Clean edit → `Evidence: go test … PASS` reported with the answer
-- [ ] `--no-verify` / plan-mode skip → no evidence block, no delay
-- [ ] `go test -race ./internal/verify/...` green; full suite passes
+- [x] Introduce a Go syntax error via edit → next turn contains `[verification failed]` and the agent repairs — ✅ 2026-08-06 (`verify_wiring_test.go`)
+- [x] Clean edit → `Evidence: go test … PASS` reported with the answer — ✅ 2026-08-06
+- [x] `--no-verify` / plan-mode skip → no evidence block, no delay — ✅ 2026-08-06 (`--no-verify` flag + plan-mode opt-out)
+- [x] `go vet` clean; full `go test ./...` green — ✅ 2026-08-06 (`b7d26e4`)
 
-**Effort:** S–M (1–2 days) · **Risk:** low–medium (bounded by max_rounds + timeout)
+**Effort:** S–M (1–2 days) · **Risk:** low–medium (bounded by max_rounds + timeout) — **implemented**
 
 ---
 
@@ -734,11 +745,13 @@ daemon owns — nightly `go test ./...` + auto-repair report, weekly docs-freshn
 
 ---
 
-### D5 — Evidence taxonomy per task type  `[⏳ folded into D2 — not standalone]`
+### D5 — Evidence taxonomy per task type  `[✅ DONE 2026-08-06 — folded into D2, not standalone]`
 
 DeepCode picks evidence *by task*. Rather than a separate phase, D2's evidence selector (step 1)
-**is** the taxonomy — extend the table as new task types appear (Python → pyright diagnostics via
-LSP, HTML/JS → eslint via LSP). No separate ticket; tracked inside D2's `evidence.go`.
+**is** the taxonomy — implemented in `internal/verify/evidence.go` (Go edit → `go test ./...`,
+no tests → `go vet`/LSP diagnostics; docs → diff-only). Extend the table as new task types appear
+(Python → pyright diagnostics via LSP, HTML/JS → eslint via LSP). No separate ticket; tracked
+inside D2's `evidence.go`.
 
 ---
 
@@ -831,10 +844,10 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
 | # | Race | Double-func | Effective? | Verdict |
 |---|------|-------------|------------|---------|
 | D1 | 🟢 read-only boot-time probe; separate file | 🔴 `rules.go` exists but only **writes/detects** for other agents — no self-ingest; no conflict | 🟢 rules steering every turn = real win | 🟢 reuse learnings injection (A10) mechanism; cap size |
-| D2 | 🟢 new package; gate in tool loop is sequential | 🟡 `autoTest()` (Go-only, fire-and-forget) + `internal/layers/verify_on_stop.go` (nudge) — **no verify→repair loop exists** | 🟢 the #1 waste in coding agents; bounded by max_rounds | 🟢 cap rounds/timeouts; never claim success with failing evidence |
+| D2 | 🟢 new package; gate in tool loop is sequential | ✅ implemented `b7d26e4` — `internal/verify/evidence.go` + `loop.go`; wired via `verifyToolCalls()`; bounded by `verify.max_rounds` (not global `maxToolRounds`) | 🟢 the #1 waste in coding agents; bounded by max_rounds | ✅ done — cap rounds/timeouts; never claim success with failing evidence |
 | D3 | 🔴 nested agent concurrency = race risk (the v1 deferral) | 🟢 worktree.go is infra only — no orchestrator exists | 🟡 real win only if isolation holds | 🟡 gate default **off**; require `go test -race`; per-agent budget |
 | D4 | 🟢 scheduler single-goroutine ticker + overlap guard | 🟢 hooks (Phase 5) are event-driven — no scheduler exists | 🟢 | 🟢 add overlap guard + logs |
-| D5 | — | — | — | 🔴 reframe: **fold into D2** |
+| D5 | — | — | — | ✅ folded into D2 (`evidence.go`) — done `b7d26e4` |
 | D6 | 🟢 additive check before dispatch | 🟢 no per-tool permission infra; plan mode + guard_mode are different layers | 🟢 | 🟢 default `ask`/`allow` preserves behavior |
 | D7 | 🟢 prompt-only text; no new state/goroutines | 🟢 no existing commit-workflow rule in `config.go`; distinct from D2 (runtime verify loop) | 🟢 formalizes a habit already practiced | 🟢 quick win (XS); prompt-only, no deps |
 
@@ -844,13 +857,11 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
    `AGENTS.md` → `DEEPCODE.md` → `CLAUDE.md` → `.cursor/rules/*.mdc`; cap 4 KiB/40 lines; inject
    via `buildMessages()` like A10. New code lives in `internal/layers/rules_ingest.go` (package
    `layers`, already imported by the agent) — do **not** create a new `internal/rules` package.
-2. **D2** — bounded: reuse `internal/autorepair/state.go` maxRetries/backoff, default 2 rounds,
-   60 s per run; `--no-verify` + plan-mode opt-out; final answer always carries an `Evidence:`
-   block; **never report success with failing evidence**. ⚠️ The verification round counter MUST
-   be the **dedicated `verify.max_rounds` field** — do **not** rely on ELING's global
-   `maxToolRounds` (`internal/agent/agent.go:305` sets it to `math.MaxInt32`, i.e. effectively
-   unlimited; the real stop is the wall-clock `toolCtx` deadline). Each verify iteration must also
-   check `toolCtx.Err()` first to honor shutdown/config timeout.
+2. **D2** — ✅ applied `b7d26e4`: bounded by the dedicated `verify.max_rounds` field (default 2
+   rounds; **not** ELING's global `maxToolRounds`), reuse `internal/autorepair/state.go`
+   maxRetries/backoff, `--no-verify` + plan-mode opt-out; each iteration checks `toolCtx.Err()` first
+   to honor shutdown/config timeout; final answer always carries an `Evidence:` block; **never report
+   success with failing evidence**.
 3. **D3** — `agents.enabled` default **off**; max 2 concurrent subagents; per-agent token budget
    cap; merges go through `worktree_merge --review` diff report only; conflict = report, never
    silent auto-merge; `go test -race ./internal/agents/...` mandatory.
@@ -863,10 +874,10 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
 
 1. `./rebuild.sh` mandatory before commit; `go test -race ./...` for D2 and D3 (concurrency).
 2. `create_backup` before each phase; one phase per commit.
-3. D1 (S) is the quick win → land first; D2 (S–M) is the headline phase → second.
+3. ✅ D1 (S) landed first (`49372ca`); D2 (S–M) the headline phase landed second (`b7d26e4`). **Remaining order:** D4 → D6 → D3.
 4. Update `docs/` (A7 subsystem docs — add `docs/verify.md`, `docs/rules.md` etc.) in the same
-   commit as any phase.
-5. Bump version via `go-version-bump` on milestones (D2 is a strong v0.5.0 candidate).
+   commit as any phase. ✅ `docs/verify.md` shipped in `b7d26e4`; `docs/rules.md` in `49372ca`.
+5. Bump version via `go-version-bump` on milestones (D2 is a strong v0.5.0 candidate). ⏳ **Not yet bumped** — D2 (`b7d26e4`) is unversioned; latest tag is still `v0.4.4`. Consider a v0.5.0 tag now or at the next milestone.
 
 ## ❌ Not Adoptable / Out of Scope (DeepCode)
 
