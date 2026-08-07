@@ -469,12 +469,42 @@ func (a *Agent) shapeEndMessage(msg string) string {
 	if !wrap.Shaped() {
 		return msg
 	}
+	if a.guardrailEndMessageVeto(wrap.Used()) {
+		// Strict mode: refuse to emit the shaped message — the invariant
+		// (end message under budget) is violated, so the original is kept.
+		log.Printf("guardrails veto: shaped end-message violates invariants, discarding shaped output")
+		return msg
+	}
 	a.fireHook(layers.HookEndMessageProduce, map[string]interface{}{
 		"before_len": before,
 		"after_len":  wrap.Used(),
 		"note":       wrap.Note(),
 	})
 	return wrap.String()
+}
+
+// guardrailEndMessageVeto runs the P3 end-message guardrail over the shaped
+// message and reports whether the emit path must be vetoed. In audit-only
+// mode violations are logged but never vetoed; the plumber returns false.
+// A zero guardrails block (both knobs false) never inspects or logs — the
+// wire is fully inert.
+func (a *Agent) guardrailEndMessageVeto(shapedLen int) bool {
+	if a.cfg == nil || !a.cfg.Guardrails.Active() {
+		return false
+	}
+	asserts := layers.AssertAll(layers.GuardWitness{
+		EndMsgPolicy: layers.EndMessagePolicy{
+			MaxRunes:         a.cfg.Output.EndMessageRunes,
+			MaxParas:         a.cfg.Output.EndMessageParas,
+			DisallowMarkdown: a.cfg.Output.EndMessageNoMD,
+		},
+		EndMsgLen: shapedLen,
+	})
+	if len(asserts) == 0 {
+		return false
+	}
+	log.Printf("guardrails audit: %s", layers.DescribeAll(asserts))
+	return a.cfg.Guardrails.Strict
 }
 
 // SetPlanApprover atomically replaces the plan-approval callback. Safe to
@@ -2039,8 +2069,8 @@ func (a *Agent) GetStats() map[string]interface{} {
 		"learnings":         len(a.learnings),
 		"tools_available":   a.ToolRegistry.Count(),
 		"mcp_servers":       len(mcpServers),
-		"mcp_failures":     len(a.MCP.Failures()),
-		"mcp_tools":        0,
+		"mcp_failures":      len(a.MCP.Failures()),
+		"mcp_tools":         0,
 		"model":             a.cfg.Agent.DefaultModel,
 		"session":           a.sessionName,
 		"token_budget":      a.cfg.Agent.MaxContext,
