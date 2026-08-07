@@ -87,10 +87,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:   cfg,
-		done:  make(chan struct{}),
-		stdin: os.Stdin,
-		tools: make(map[string]ToolDefinition),
+		cfg:    cfg,
+		done:   make(chan struct{}),
+		stdin:  os.Stdin,
+		stdout: os.Stdout, // without this the server could never answer a client
+		tools:  make(map[string]ToolDefinition),
 	}
 
 	// Initialize all 8 memory layers
