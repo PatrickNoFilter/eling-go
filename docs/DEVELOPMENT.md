@@ -12,8 +12,7 @@
 
 ```bash
 # Clone
-git clone https://github.com/yourusername/eling.git
-cd eling
+git clone https://github.com/PatrickNoFilter/eling-go.git eling && cd eling
 
 # Install dependencies
 go mod download

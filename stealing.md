@@ -897,7 +897,7 @@ Audited every candidate against the real codebase (`/root/eling`). Result per it
 3. ✅ D1 (S) landed first (`49372ca`); D2 (S–M) the headline phase landed second (`b7d26e4`); D4 (M) landed third (`8f733ae`); D6 (M) fourth (`bdf1818` + tui `c6117eb`); D3 (M, gated) fifth and last (`26a2a2f`). **All Part III candidates landed 2026-08-07.**
 4. Update `docs/` (A7 subsystem docs — add `docs/verify.md`, `docs/rules.md` etc.) in the same
    commit as any phase. ✅ `docs/verify.md` shipped in `b7d26e4`; `docs/rules.md` in `49372ca`.
-5. Bump version via `go-version-bump` on milestones (D2 is a strong v0.5.0 candidate). ⏳ **Not yet bumped** — D2 (`b7d26e4`) is unversioned; latest tag is still `v0.4.4`. Consider a v0.5.0 tag now or at the next milestone.
+5. Bump version via `go-version-bump` on milestones (D2 is a strong v0.5.0 candidate). ✅ **Bumped** — latest tag is `v0.6.0` (released from HEAD `e5a5560`); snapshot-budget phase shipped under that release.
 
 ## ❌ Not Adoptable / Out of Scope (DeepCode)
 

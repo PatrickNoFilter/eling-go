@@ -124,6 +124,7 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 - **MCP per-call timeouts** (v0.4.0): every MCP tool call runs under a wall-clock guard too — registry-backed tools (bash/read/write/edit/grep/web_*) keep their registry budgets, and the direct layer handlers (`brain_*`, `facts_*`, `kb_*`, `obsidian_*`, `continuum_*`, `notion_sync`, `markdownify_*`, `system_info`, `blackbox_*`, `code_*`) get strict budgets (10–60 s by category) so a slow layer or network call can never hang an MCP request. Callers can override with a `tool_timeout_sec` arg
 - **Auto-Repair & tool health** (v0.4.0+): every tool failure is classified (`missing_dep`, `config_drift`, `crash`, `transient`, …) over a rolling window; repeated identical breakage escalates to `autofix`, crashes quarantine the tool (persisted to `~/.eling/autorepair_state.json`, hidden from the LLM), and transient failures only back off + retry. **Autofix is opt-in** (`autorepair.autofix: true`) and every repair is probe-first + idempotent with exponential backoff, a bounded retry budget, a commit guard for code-mutating fixes, and `.bak` backups. See `docs/TOOLS.md` → Auto-Repair & Tool Health, `eling autorepair` / `eling tools-health`.
 - **Graceful shutdown**: Saves state on SIGTERM, SIGINT
+- **Session resource budget** (v0.6.0): per-session `max_duration_sec` / `max_turns` / `idle_timeout_sec` limits enforced across the REPL and TUI (root deadline, per-turn idle stopwatch, turn-count bucket) with auto-save on exit. Defaults all `off` — see `docs/session.md` and `sessionbudget.md`. Config: `session.max_duration_sec`, `session.max_turns`, `session.idle_timeout_sec`, plus `ELING_SESSION_MAX_DURATION_SEC` env override
 - **Auto-save**: Periodic state persistence (configurable)
 - **Fatal signal handler**: Catches SIGBUS/SIGSEGV for crash reporting
 
@@ -139,8 +140,7 @@ Results from all layers are fused using **RRF (Reciprocal Rank Fusion)** — the
 
 ```bash
 # Clone and build
-git clone https://github.com/yourusername/eling.git
-cd eling
+git clone https://github.com/PatrickNoFilter/eling-go.git eling && cd eling
 go build -o eling .
 
 # Set your API key
@@ -581,6 +581,8 @@ echo "$ctx" | grep -q '"tool_name":"edit"' && (cd /root/eling && go vet ./... >/
 ---
 
 ## 🔧 Provider Setup
+
+> **v0.6.0:** Session resource budget — configurable `session.max_duration_sec` / `session.max_turns` / `session.idle_timeout_sec` (default all `0 = off`) enforced across the **REPL and TUI** (root deadline, per-turn bucket, idle stopwatch), with auto-save on idle/turn-limit exit, a `/budget` slash command, config CLI keys, and an `ELING_SESSION_MAX_DURATION_SEC` env override for unattended `automate`/`benchmark` runs. See `docs/session.md` and `sessionbudget.md`.
 
 > **v0.4.4:** Stats persistence + learnings injection — `Agent.GetStats()` now carries runtime metrics (tool call counts, success rate, avg latency, per-provider spend) that are saved to `~/.eling/stats.json` on graceful shutdown and rendered by `./eling stats`; durable learnings from `~/.eling/learnings.md` are **injected into the system prompt at boot** (capped to the last 10), so lessons from past sessions carry forward automatically.
 
