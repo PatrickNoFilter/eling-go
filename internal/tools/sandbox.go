@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -86,6 +87,8 @@ func sandboxGuardMode() string {
 func newSandboxDir() string {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
+		atomic.AddInt64(&sandboxState.entropyFallback, 1)
+		noteEntropyFallback()
 		return filepath.Join(sandboxRoot(), fmt.Sprintf("run-%d", time.Now().UnixNano()))
 	}
 	return filepath.Join(sandboxRoot(), fmt.Sprintf("run-%d-%s", time.Now().Unix(), hex.EncodeToString(b)))
@@ -95,6 +98,56 @@ func newSandboxDir() string {
 // cleanup prunes the oldest ones. Prevents unbounded accumulation of
 // throwaway dirs under ~/.eling/sandbox (which slows du/ls/backups).
 const maxSandboxDirs = 25
+
+// ── sandbox observability ───────────────────────────────────────────────
+// Cumulative counters surfaced via Stats()["sandbox"]. These turn the
+// sandbox's previously-silent failure modes — unshare missing (network
+// isolation silently dropped), cleanup remove failures, entropy/home
+// fallbacks, and output truncation — into observed, queryable indicators so
+// the agent no longer assumes it ran isolated when it actually did not.
+var sandboxState struct {
+	invocations         int64 // sandboxed invocations actually launched
+	cleanupRemoveFailed int64 // a run-* dir could not be pruned
+	netUnshareMissing   int64 // unshare not found → net isolation dropped
+	dirCreateFailed     int64 // MkdirAll failed for a fresh sandbox dir
+	entropyFallback     int64 // crypto/rand failed → timestamp-only dir name
+	homeFallback        int64 // os.UserHomeDir failed → fell back to /root
+	outputTruncated     int64 // captured output hit the 512 KiB cap
+}
+
+// One-time stderr notes for the rare, normally-silent fallbacks (entropy and
+// home lookup). Each fires at most once per process (sync.Once) so a genuinely
+// degraded host logs a hint without spamming stderr on every invocation.
+var (
+	entropyNoteOnce sync.Once
+	homeNoteOnce    sync.Once
+)
+
+func noteEntropyFallback() {
+	entropyNoteOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "[sandbox] note: crypto/rand unavailable; sandbox dir names fall back to timestamp-only (entropy_fallback counter bumps)\n")
+	})
+}
+
+func noteHomeFallback() {
+	homeNoteOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "[sandbox] note: os.UserHomeDir failed; tool caches fall back to /root (home_fallback counter bumps)\n")
+	})
+}
+
+// sandboxMetrics returns the current sandbox counters as a map, nested under
+// Stats()["sandbox"] so the agent dashboard can inspect them.
+func sandboxMetrics() map[string]interface{} {
+	return map[string]interface{}{
+		"invocations":            atomic.LoadInt64(&sandboxState.invocations),
+		"cleanup_remove_failed":  atomic.LoadInt64(&sandboxState.cleanupRemoveFailed),
+		"net_unshare_missing":    atomic.LoadInt64(&sandboxState.netUnshareMissing),
+		"dir_create_failed":      atomic.LoadInt64(&sandboxState.dirCreateFailed),
+		"entropy_fallback":       atomic.LoadInt64(&sandboxState.entropyFallback),
+		"home_fallback":          atomic.LoadInt64(&sandboxState.homeFallback),
+		"output_truncated":       atomic.LoadInt64(&sandboxState.outputTruncated),
+	}
+}
 
 // cleanupSandbox prunes old run-* sandbox dirs, keeping only the most
 // recent maxSandboxDirs. Called periodically when creating a new dir.
@@ -126,7 +179,9 @@ func cleanupSandbox() {
 	sort.Slice(dirs, func(i, j int) bool { return dirs[i].mod.Before(dirs[j].mod) })
 	excess := dirs[:len(dirs)-maxSandboxDirs]
 	for _, d := range excess {
-		_ = os.RemoveAll(filepath.Join(root, d.name))
+		if err := os.RemoveAll(filepath.Join(root, d.name)); err != nil {
+			atomic.AddInt64(&sandboxState.cleanupRemoveFailed, 1)
+		}
 	}
 }
 
@@ -169,6 +224,8 @@ func realHome() string {
 	if h, err := os.UserHomeDir(); err == nil && h != "" {
 		return h
 	}
+	atomic.AddInt64(&sandboxState.homeFallback, 1)
+	noteHomeFallback()
 	return "/root"
 }
 
@@ -249,14 +306,16 @@ func scrubEnv(sandboxDir string) []string {
 }
 
 // wrapNetworkIsolation rewrites the command to run inside a network
-// namespace when `unshare` is available; otherwise returns it unchanged
-// (best-effort, ignore failure — the working-dir + env + guard layers still
-// apply).
-func wrapNetworkIsolation(command string) string {
+// namespace when `unshare` is available. The second return value reports
+// whether isolation actually engaged — the caller surfaces it on the result,
+// so the agent can SEE when the guard dropped (e.g. unshare absent on a
+// Termux/proot host) instead of silently assuming network isolation is on.
+func wrapNetworkIsolation(command string) (string, bool) {
 	if _, err := exec.LookPath("unshare"); err != nil {
-		return command
+		atomic.AddInt64(&sandboxState.netUnshareMissing, 1)
+		return command, false
 	}
 	// unshare -n requires privileges; if it fails the command simply errors
 	// and the user can retry with allow_host. Never silently drop the guard.
-	return fmt.Sprintf("unshare -n bash -c %q", command)
+	return fmt.Sprintf("unshare -n bash -c %q", command), true
 }

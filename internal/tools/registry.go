@@ -298,7 +298,8 @@ func (r *Registry) Stats() map[string]interface{} {
 		"tool_failures":       totalFailures,
 		"tool_success_rate":   rate,
 		"tool_avg_latency_ms": avgMs,
-		"per_tool":            perTool,
+		"per_tool": perTool,
+		"sandbox":  sandboxMetrics(),
 	}
 }
 

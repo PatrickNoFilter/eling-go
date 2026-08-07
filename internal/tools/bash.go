@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -172,6 +173,7 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 
 	// ── Phase 1 sandbox ────────────────────────────────────────────────────
 	sandboxed := false
+	netIsolated := false
 	sandboxDir := ""
 	var env []string
 	if SandboxEnabled() && !allowHost {
@@ -193,6 +195,7 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 		// Fresh per-invocation directory.
 		sandboxDir = newSandboxDir()
 		if err := os.MkdirAll(sandboxDir, 0o755); err != nil {
+			atomic.AddInt64(&sandboxState.dirCreateFailed, 1)
 			return Err("sandbox: create sandbox dir: " + err.Error()), nil
 		}
 		// Opportunistically prune stale sandbox dirs so they don't pile up.
@@ -201,7 +204,8 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 			dir = sandboxDir // commands default into the sandbox
 		}
 		env = scrubEnv(sandboxDir)
-		command = wrapNetworkIsolation(command)
+		command, netIsolated = wrapNetworkIsolation(command)
+		atomic.AddInt64(&sandboxState.invocations, 1)
 		sandboxed = true
 	}
 	// ───────────────────────────────────────────────────────────────────────
@@ -240,18 +244,11 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				exitCode = exitErr.ExitCode()
 			} else {
-				return nil, fmt.Errorf("bash execution failed: %w", err)
+				return nil, fmt.Errorf("bash execution failed (sandbox=%v, network_isolation=%v): %w", sandboxed, netIsolated, err)
 			}
 		}
 
-		stdoutStr := strings.TrimSpace(stdout.String())
-		stderrStr := strings.TrimSpace(stderr.String())
-		if stdout.Len() >= maxBashOutputBytes {
-			stdoutStr += "\n... [stdout truncated at 512 KiB]"
-		}
-		if stderr.Len() >= maxBashOutputBytes {
-			stderrStr += "\n... [stderr truncated at 512 KiB]"
-		}
+		stdoutStr, stderrStr := finalizeOutput(stdout, stderr)
 
 		result := map[string]interface{}{
 			"exit_code": exitCode,
@@ -262,6 +259,7 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 		}
 		if sandboxed {
 			result["sandbox_dir"] = sandboxDir
+			result["network_isolation"] = netIsolated
 		}
 
 		return OK(result), nil
@@ -270,14 +268,7 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 		// Kill the entire process group (not just the direct child) so
 		// grandchildren like `du`, `find`, `go` don't keep running.
 		killProcessGroup(cmd)
-		stdoutStr := strings.TrimSpace(stdout.String())
-		stderrStr := strings.TrimSpace(stderr.String())
-		if stdout.Len() >= maxBashOutputBytes {
-			stdoutStr += "\n... [stdout truncated at 512 KiB]"
-		}
-		if stderr.Len() >= maxBashOutputBytes {
-			stderrStr += "\n... [stderr truncated at 512 KiB]"
-		}
+		stdoutStr, stderrStr := finalizeOutput(stdout, stderr)
 		result := map[string]interface{}{
 			"exit_code": -1,
 			"stdout":    stdoutStr,
@@ -288,7 +279,25 @@ func bashExecute(args map[string]interface{}) (interface{}, error) {
 		}
 		if sandboxed {
 			result["sandbox_dir"] = sandboxDir
+			result["network_isolation"] = netIsolated
 		}
 		return OK(result), nil
 	}
+}
+
+// finalizeOutput trims captured stdout/stderr, appends a truncation marker
+// when either stream hit the 512 KiB cap, and records the truncation counter
+// so output silently dropped by the cap becomes an observed indicator.
+func finalizeOutput(stdout, stderr *limitedBuffer) (string, string) {
+	so := strings.TrimSpace(stdout.String())
+	se := strings.TrimSpace(stderr.String())
+	if stdout.Len() >= maxBashOutputBytes {
+		atomic.AddInt64(&sandboxState.outputTruncated, 1)
+		so += "\n... [stdout truncated at 512 KiB]"
+	}
+	if stderr.Len() >= maxBashOutputBytes {
+		atomic.AddInt64(&sandboxState.outputTruncated, 1)
+		se += "\n... [stderr truncated at 512 KiB]"
+	}
+	return so, se
 }
