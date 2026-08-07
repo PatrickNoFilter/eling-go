@@ -10,6 +10,7 @@ import (
 
 	"eling/internal/agent"
 	"eling/internal/autorepair"
+	"eling/internal/budget"
 	"eling/internal/lsp"
 	"eling/internal/tools"
 
@@ -99,6 +100,7 @@ type activeTool struct {
 // Model is the Bubbletea model for the ELING TUI.
 type Model struct {
 	agent           *agent.Agent
+	sess            *budget.Budget // session resource budget (nil = not wired/off)
 	vp              viewport.Model
 	input           textarea.Model
 	messages        []string
@@ -132,8 +134,10 @@ type Model struct {
 	permPrompt      string                 // tool name being gated, for the footer prompt
 }
 
-// NewProgram creates a new Bubbletea program with the given agent and timezone location.
-func NewProgram(ag *agent.Agent, loc *time.Location) *tea.Program {
+// NewProgram creates a new Bubbletea program with the given agent and timezone
+// location. sess is the session resource budget (nil or a zero budget = off);
+// it powers the TUI idle stopwatch and turn-count bucket (layers B/C).
+func NewProgram(ag *agent.Agent, loc *time.Location, sess *budget.Budget) *tea.Program {
 	s := spinner.New()
 	s.Style = dimSty
 
@@ -159,6 +163,7 @@ func NewProgram(ag *agent.Agent, loc *time.Location) *tea.Program {
 
 	m := Model{
 		agent: ag,
+		sess:  sess,
 		input: ti,
 		messages: []string{
 			welcomeMsg(80),
@@ -185,6 +190,16 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) tick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return clockTick{} })
+}
+
+// touchActivity resets the session idle stopwatch. It is called on genuine
+// user activity — keystrokes and turn completion — so a long running turn or a
+// user composing a long prompt are never mistaken for an idle session. Agent
+// output alone does not count as user activity.
+func (m *Model) touchActivity() {
+	if m.sess != nil {
+		m.sess.Activity()
+	}
 }
 
 // neededInputLines calculates how many terminal rows the current text needs.
@@ -424,6 +439,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp.SetContent(strings.Join(m.messages, "\n"))
 
 	case tea.KeyMsg:
+		// A keystroke is genuine user activity — refresh the idle stopwatch.
+		m.touchActivity()
 		// While a drafted plan is awaiting approval, intercept y/N/Enter/Esc.
 		// The Ask goroutine is blocked on planCh until the user decides.
 		if m.awaitingPlan {
@@ -709,6 +726,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.ready {
 			return m, m.tick()
 		}
+		// Session idle stopwatch (Layer C): piggyback on the existing 1s ticker,
+		// so no extra goroutine races the update loop. Idle only elapses BETWEEN
+		// turns — never while a turn is loading or a plan/permission prompt is
+		// awaiting input (an active turn is not "idle").
+		if m.sess != nil && !m.loading && !m.awaitingPlan && !m.awaitingPerm {
+			if idleEx := m.sess.CheckIdle(); idleEx != nil {
+				snap := m.sess.Snapshot()
+				_ = m.agent.SaveState()
+				m.messages = append(m.messages, dimSty.Render(fmt.Sprintf("  session idle limit reached (%s) — state saved", snap.IdleTimeout)))
+				m.vp.SetContent(strings.Join(m.messages, "\n"))
+				m.vp.GotoBottom()
+				return m, tea.Quit
+			}
+		}
 		// Update elapsed time for all active (running) tool calls
 		for i := range m.activeTools {
 			at := &m.activeTools[i]
@@ -856,6 +887,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case respMsg:
 		m.loading = false
 		m.cancel = nil // reset cancel function
+		// The turn finished; refresh the idle stopwatch so a long-running turn
+		// is never immediately treated as idle.
+		m.touchActivity()
 		m.awaitingPlan = false
 		m.planCh = nil
 		m.awaitingPerm = false
@@ -879,6 +913,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.loading = false
 		m.cancel = nil // reset cancel function
+		// The turn (with error) is over — refresh the idle stopwatch.
+		m.touchActivity()
 		m.awaitingPlan = false
 		m.planCh = nil
 		m.awaitingPerm = false
@@ -922,6 +958,23 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 	if strings.HasPrefix(text, "/") {
 		return m.cmd(text)
+	}
+
+	// Session resource budget (Layer B): count this user turn and stop
+	// gracefully once the cap is reached. BeginTurn also resets the idle
+	// stopwatch, so an active session is never flagged idle. Slash commands
+	// and agent output do not count toward the turn bucket.
+	if m.sess != nil {
+		if m.sess.BeginTurn() {
+			snap := m.sess.Snapshot()
+			m.messages = append(m.messages, dimSty.Render(fmt.Sprintf("  session turn limit reached (max %d turns) — state saved", snap.MaxTurns)))
+			_ = m.agent.SaveState()
+			if m.ready {
+				m.vp.SetContent(strings.Join(m.messages, "\n"))
+				m.vp.GotoBottom()
+			}
+			return m, tea.Quit
+		}
 	}
 
 	m.history = append(m.history, text)
@@ -1188,6 +1241,14 @@ func (m Model) cmd(c string) (tea.Model, tea.Cmd) {
 		s := m.agent.GetSession()
 		if s != nil {
 			m.messages = append(m.messages, fmt.Sprintf("  %s | %d msgs", s.Name, len(s.Entries)))
+		}
+		if m.sess != nil {
+			if snap := m.sess.Snapshot(); snap.Armed {
+				m.messages = append(m.messages, fmt.Sprintf("  budget: %d/%d turns, max_dur=%v, idle=%v",
+					snap.TurnsUsed, snap.MaxTurns, snap.MaxDuration, snap.IdleTimeout))
+			} else {
+				m.messages = append(m.messages, dimSty.Render("  budget: off (max_turns/max_duration_sec/idle_timeout_sec = 0)"))
+			}
 		}
 
 	case "/sessions":

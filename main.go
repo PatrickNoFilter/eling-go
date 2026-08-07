@@ -653,7 +653,7 @@ func main() {
 			logger.Global().Warn("Invalid timezone %q, using Local: %v", tzName, err)
 			loc = time.Local
 		}
-		program := tui.NewProgram(ag, loc)
+		program := tui.NewProgram(ag, loc, sess)
 		func() {
 			defer recoverWithStack(ag)
 			if _, err := program.Run(); err != nil {
